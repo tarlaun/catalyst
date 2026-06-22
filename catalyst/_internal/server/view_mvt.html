@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{{ dataset_name }} • Catalyst Chat Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <link href="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    :root {
+      --bg: #0d1118;
+      --panel: #161c27;
+      --panel-2: #1e2633;
+      --panel-3: #263142;
+      --border: #2f3a4f;
+      --text: #e8edf7;
+      --muted: #96a3ba;
+      --accent: #6f8cff;
+      --accent-2: #90a5ff;
+      --danger: #ff6b6b;
+      --shadow: 0 10px 28px rgba(0,0,0,0.28);
+      --radius: 14px;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    body {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100vh;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(13, 17, 24, 0.96);
+      backdrop-filter: blur(10px);
+      z-index: 10;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .logo {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, var(--accent), #46d3c5);
+      color: #fff;
+      font-weight: 800;
+      box-shadow: var(--shadow);
+      flex: 0 0 auto;
+    }
+
+    .brand-copy {
+      min-width: 0;
+    }
+
+    .brand-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-subtitle {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    button {
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 9px 12px;
+      font: inherit;
+      cursor: pointer;
+      transition: 0.18s ease;
+    }
+
+    button:hover {
+      background: var(--panel-3);
+      border-color: var(--accent);
+    }
+
+    button.primary {
+      background: var(--accent);
+      color: white;
+      border-color: transparent;
+    }
+
+    button.primary:hover {
+      background: var(--accent-2);
+    }
+
+    .layout {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 390px minmax(0, 1fr);
+    }
+
+    .sidebar {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto auto auto 1fr auto;
+      border-right: 1px solid var(--border);
+      background: var(--panel);
+    }
+
+    .panel {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .panel h2, .panel h3 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .status-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .status-card {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 11px 12px;
+    }
+
+    .status-label {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-bottom: 4px;
+    }
+
+    .status-value {
+      font-size: 13px;
+      word-break: break-word;
+    }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .chip {
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: 0.18s ease;
+    }
+
+    .chip:hover {
+      border-color: var(--accent);
+      background: var(--panel-3);
+    }
+
+    .chat-log {
+      min-height: 0;
+      overflow: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: #121824;
+    }
+
+    .msg {
+      max-width: 92%;
+      border-radius: 14px;
+      padding: 11px 12px;
+      box-shadow: var(--shadow);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .msg.user {
+      align-self: flex-end;
+      background: linear-gradient(135deg, var(--accent), #5a79ff);
+      color: white;
+      border-bottom-right-radius: 6px;
+    }
+
+    .msg.assistant {
+      align-self: flex-start;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 6px;
+    }
+
+    .msg .meta {
+      display: block;
+      font-size: 11px;
+      color: rgba(255,255,255,0.74);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .msg.assistant .meta {
+      color: var(--muted);
+    }
+
+    .chat-input {
+      padding: 14px 16px 16px;
+      background: var(--panel);
+    }
+
+    .chat-input textarea {
+      width: 100%;
+      min-height: 86px;
+      max-height: 180px;
+      resize: vertical;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      font: inherit;
+      outline: none;
+      transition: border-color 0.18s ease, background 0.18s ease;
+    }
+
+    .chat-input textarea:focus {
+      border-color: var(--accent);
+      background: #222b39;
+    }
+
+    .chat-actions {
+      margin-top: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .helper {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .main {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 1fr auto;
+      background: #0b1017;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+      min-height: 420px;
+    }
+
+    .footer-panels {
+      border-top: 1px solid var(--border);
+      padding: 14px 16px;
+      background: rgba(13, 17, 24, 0.96);
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      gap: 14px;
+    }
+
+    .box {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      min-height: 130px;
+    }
+
+    .box h3 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+    }
+
+    .kv-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .kv {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 9px 10px;
+    }
+
+    .kv .k {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-bottom: 3px;
+    }
+
+    .kv .v {
+      font-size: 13px;
+      word-break: break-word;
+    }
+
+    .swatches {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      min-height: 22px;
+    }
+
+    .swatch {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      border: 2px solid rgba(255,255,255,0.14);
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,0.25);
+    }
+
+    .candidate-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .candidate-item {
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .candidate-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 4px;
+    }
+
+    .candidate-name {
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .candidate-score {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .candidate-desc {
+      color: var(--muted);
+      font-size: 12px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      max-width: 360px;
+      background: #17202d;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 12px;
+      padding: 12px 14px;
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: 0.2s ease;
+      z-index: 40;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .toast.error {
+      border-color: rgba(255,107,107,0.45);
+    }
+
+    .maplibregl-popup-content {
+      background: #18202c;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+    }
+
+    .maplibregl-popup-tip {
+      border-top-color: #18202c !important;
+    }
+
+    @media (max-width: 1100px) {
+      .layout {
+        grid-template-columns: 370px minmax(0, 1fr);
+      }
+
+      .footer-panels {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .chat-log {
+        max-height: 300px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">S</div>
+      <div class="brand-copy">
+        <div class="brand-title">{{ dataset_name }}</div>
+        <div class="brand-subtitle">Chat with Gemini to restyle this dataset live.</div>
+      </div>
+    </div>
+
+    <div class="top-actions">
+      <button id="resetChatBtn">Reset conversation</button>
+      <button id="fitBoundsBtn">Fit map</button>
+      <button id="homeBtn">Home</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Dataset</h2>
+        <div class="status-grid">
+          <div class="status-card">
+            <div class="status-label">Current dataset</div>
+            <div id="currentDatasetValue" class="status-value">{{ dataset_id }}</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Selected attribute</div>
+            <div id="selectedAttributeValue" class="status-value">None</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Interaction id</div>
+            <div id="interactionIdValue" class="status-value">None</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Try prompts</h2>
+        <div class="chip-row">
+          <button class="chip prompt-chip" data-prompt="color this dataset based on a meaningful numeric attribute">Meaningful numeric style</button>
+          <button class="chip prompt-chip" data-prompt="change the color theme to be red to green instead">Red to green theme</button>
+          <button class="chip prompt-chip" data-prompt="make the lines thinner">Make thinner</button>
+          <button class="chip prompt-chip" data-prompt="actually color by road_class instead">Switch attribute</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Hover info</h2>
+        <div class="status-card">
+          <div class="status-label">Feature preview</div>
+          <div id="hoverPreviewValue" class="status-value">Move over the map to inspect attributes.</div>
+        </div>
+      </section>
+
+      <section id="chatLog" class="chat-log"></section>
+
+      <section class="chat-input">
+        <textarea id="chatInput" placeholder="Try: color this dataset based on speed limit"></textarea>
+        <div class="chat-actions">
+          <div class="helper">This page starts with the current dataset fixed and lets follow-up prompts refine the style.</div>
+          <div style="display:flex; gap:10px;">
+            <button id="clearInputBtn">Clear</button>
+            <button id="sendBtn" class="primary">Send</button>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <main class="main">
+      <div id="map"></div>
+
+      <div class="footer-panels">
+        <section class="box">
+          <h3>Applied style</h3>
+          <div class="kv-grid">
+            <div class="kv">
+              <div class="k">Dataset</div>
+              <div id="styleDatasetValue" class="v">{{ dataset_id }}</div>
+            </div>
+            <div class="kv">
+              <div class="k">Attribute</div>
+              <div id="styleAttributeValue" class="v">None</div>
+            </div>
+            <div class="kv">
+              <div class="k">Style type</div>
+              <div id="styleTypeValue" class="v">Default</div>
+            </div>
+            <div class="kv">
+              <div class="k">Legend title</div>
+              <div id="legendTitleValue" class="v">None</div>
+            </div>
+          </div>
+
+          <div class="kv" style="margin-bottom:10px;">
+            <div class="k">Palette</div>
+            <div id="swatches" class="swatches"></div>
+          </div>
+
+          <div class="kv">
+            <div class="k">Renderer details</div>
+            <div id="rendererDetailsValue" class="v">No LLM style has been applied yet.</div>
+          </div>
+        </section>
+
+        <section class="box">
+          <h3>Top candidates</h3>
+          <div id="candidateList" class="candidate-list">
+            <div class="empty">This dataset page keeps the current dataset fixed, so retrieval candidates are mostly informational.</div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    const DATASET_ID = {{ dataset_id|tojson }};
+    const DATASET_NAME = {{ dataset_name|tojson }};
+    const TILE_URL = `${window.location.origin}/${encodeURIComponent(DATASET_ID)}/{z}/{x}/{y}.mvt`;
+
+    const state = {
+      dataset: DATASET_ID,
+      interactionId: "",
+      currentAttributes: [],
+      currentStyle: null,
+      stats: null,
+      popup: null
+    };
+
+    const els = {
+      currentDatasetValue: document.getElementById("currentDatasetValue"),
+      selectedAttributeValue: document.getElementById("selectedAttributeValue"),
+      interactionIdValue: document.getElementById("interactionIdValue"),
+      hoverPreviewValue: document.getElementById("hoverPreviewValue"),
+      chatLog: document.getElementById("chatLog"),
+      chatInput: document.getElementById("chatInput"),
+      clearInputBtn: document.getElementById("clearInputBtn"),
+      sendBtn: document.getElementById("sendBtn"),
+      resetChatBtn: document.getElementById("resetChatBtn"),
+      fitBoundsBtn: document.getElementById("fitBoundsBtn"),
+      homeBtn: document.getElementById("homeBtn"),
+      styleDatasetValue: document.getElementById("styleDatasetValue"),
+      styleAttributeValue: document.getElementById("styleAttributeValue"),
+      styleTypeValue: document.getElementById("styleTypeValue"),
+      legendTitleValue: document.getElementById("legendTitleValue"),
+      swatches: document.getElementById("swatches"),
+      rendererDetailsValue: document.getElementById("rendererDetailsValue"),
+      candidateList: document.getElementById("candidateList"),
+      toast: document.getElementById("toast")
+    };
+
+    function showToast(message, isError = false) {
+      els.toast.textContent = message;
+      els.toast.classList.toggle("error", !!isError);
+      els.toast.classList.add("show");
+      clearTimeout(showToast._timer);
+      showToast._timer = setTimeout(() => els.toast.classList.remove("show"), 2600);
+    }
+
+    function escapeHtml(text) {
+      return String(text ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;")
+        .replace(/\n/g, "<br>");
+    }
+
+    function escapeAttr(text) {
+      return String(text ?? "").replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+    }
+
+    function addMessage(role, text) {
+      const div = document.createElement("div");
+      div.className = `msg ${role}`;
+      div.innerHTML = `<span class="meta">${role === "user" ? "You" : "Assistant"}</span>${escapeHtml(text)}`;
+      els.chatLog.appendChild(div);
+      els.chatLog.scrollTop = els.chatLog.scrollHeight;
+    }
+
+    function setSending(sending) {
+      els.sendBtn.disabled = sending;
+      els.sendBtn.textContent = sending ? "Sending..." : "Send";
+    }
+
+    function hexToRgba(hex, alpha = 1) {
+      const clean = String(hex || "").replace("#", "");
+      if (!/^[0-9a-fA-F]{6}$/.test(clean)) return `rgba(70,130,180,${alpha})`;
+      const num = parseInt(clean, 16);
+      const r = (num >> 16) & 255;
+      const g = (num >> 8) & 255;
+      const b = num & 255;
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    function interpolateHexColor(hex1, hex2, t) {
+      const c1 = parseInt(hex1.replace("#", ""), 16);
+      const c2 = parseInt(hex2.replace("#", ""), 16);
+      const r1 = (c1 >> 16) & 255, g1 = (c1 >> 8) & 255, b1 = c1 & 255;
+      const r2 = (c2 >> 16) & 255, g2 = (c2 >> 8) & 255, b2 = c2 & 255;
+      const r = Math.round(r1 + (r2 - r1) * t);
+      const g = Math.round(g1 + (g2 - g1) * t);
+      const b = Math.round(b1 + (b2 - b1) * t);
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+
+    function colorForValue(value, min, max, colors) {
+      if (!Array.isArray(colors) || colors.length === 0) return "rgba(70,130,180,1)";
+      if (colors.length === 1) return hexToRgba(colors[0], 1);
+
+      const num = Number(value);
+      if (!Number.isFinite(num)) return hexToRgba(colors[0], 1);
+
+      const safeMin = Number.isFinite(min) ? min : 0;
+      const safeMax = Number.isFinite(max) ? max : 1;
+      const range = safeMax - safeMin || 1;
+      const p = Math.max(0, Math.min(1, (num - safeMin) / range));
+
+      const scaled = p * (colors.length - 1);
+      const i = Math.floor(scaled);
+      const frac = scaled - i;
+
+      if (i >= colors.length - 1) {
+        return hexToRgba(colors[colors.length - 1], 1);
+      }
+      return interpolateHexColor(colors[i], colors[i + 1], frac);
+    }
+
+    function stableColorForString(str, palette) {
+      const colors = Array.isArray(palette) && palette.length ? palette : ["#1f78b4"];
+      let h = 0;
+      const s = String(str ?? "");
+      for (let i = 0; i < s.length; i++) {
+        h = ((h << 5) - h) + s.charCodeAt(i);
+        h |= 0;
+      }
+      return colors[Math.abs(h) % colors.length];
+    }
+
+    function geometryKindFromFeature(feature) {
+      const type = feature.geometry?.type || "";
+      if (type.includes("Line")) return "line";
+      if (type.includes("Polygon")) return "polygon";
+      if (type.includes("Point")) return "point";
+      return "line";
+    }
+
+    function defaultLineStyle() {
+      return {
+        "line-color": "#3ea0ff",
+        "line-width": 2.0,
+        "line-opacity": 0.9
+      };
+    }
+
+    function defaultFillStyle() {
+      return {
+        "fill-color": "#4f89ff",
+        "fill-opacity": 0.35,
+        "fill-outline-color": "#2f6ee8"
+      };
+    }
+
+    function defaultCircleStyle() {
+      return {
+        "circle-color": "#6f8cff",
+        "circle-radius": 4,
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": 1,
+        "circle-opacity": 0.95
+      };
+    }
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: {
+        version: 8,
+        sources: {
+          basemap: {
+            type: "raster",
+            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tileSize: 256
+          },
+          local: {
+            type: "vector",
+            tiles: [TILE_URL],
+            minzoom: 0,
+            maxzoom: 14
+          }
+        },
+        layers: [
+          {
+            id: "basemap",
+            type: "raster",
+            source: "basemap"
+          },
+          {
+            id: "dataset-fill",
+            type: "fill",
+            source: "local",
+            "source-layer": "layer0",
+            filter: ["==", "$type", "Polygon"],
+            paint: defaultFillStyle()
+          },
+          {
+            id: "dataset-line",
+            type: "line",
+            source: "local",
+            "source-layer": "layer0",
+            filter: ["in", "$type", "LineString", "MultiLineString", "Polygon", "MultiPolygon"],
+            paint: defaultLineStyle()
+          },
+          {
+            id: "dataset-point",
+            type: "circle",
+            source: "local",
+            "source-layer": "layer0",
+            filter: ["==", "$type", "Point"],
+            paint: defaultCircleStyle()
+          }
+        ]
+      },
+      center: [-98.5795, 39.8283],
+      zoom: 4
+    });
+
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+    state.popup = new maplibregl.Popup({
+      closeButton: false,
+      closeOnClick: false
+    });
+
+    map.on("load", () => {
+      wireHover();
+      fitBoundsSoft();
+    });
+
+    function wireHover() {
+      const layers = ["dataset-fill", "dataset-line", "dataset-point"];
+
+      layers.forEach(layerId => {
+        map.on("mousemove", layerId, (e) => {
+          const feature = e.features?.[0];
+          if (!feature) return;
+
+          const props = feature.properties || {};
+          const previewKeys = Object.keys(props).slice(0, 6);
+          const lines = previewKeys.map(k => `${k}: ${props[k]}`);
+          els.hoverPreviewValue.textContent = lines.length ? lines.join(" | ") : "No properties";
+
+          map.getCanvas().style.cursor = "pointer";
+          state.popup
+            .setLngLat(e.lngLat)
+            .setHTML(`
+              <div style="font-size:12px; line-height:1.4;">
+                ${previewKeys.length
+                  ? previewKeys.map(k => `<div><b>${escapeHtml(k)}</b>: ${escapeHtml(String(props[k]))}</div>`).join("")
+                  : "<div>No properties</div>"
+                }
+              </div>
+            `)
+            .addTo(map);
+        });
+
+        map.on("mouseleave", layerId, () => {
+          map.getCanvas().style.cursor = "";
+          state.popup.remove();
+        });
+      });
+    }
+
+    async function loadStats() {
+      try {
+        const resp = await fetch(`/api/datasets/${encodeURIComponent(DATASET_ID)}/stats`);
+        if (!resp.ok) return;
+        state.stats = await resp.json();
+      } catch (err) {
+        console.warn("Could not load stats", err);
+      }
+    }
+
+    function fitBoundsSoft() {
+      try {
+        map.fitBounds([[-125, 24], [-66, 50]], {
+          padding: 40,
+          duration: 500
+        });
+      } catch (e) {}
+    }
+
+    function renderCandidates(topk) {
+      if (!Array.isArray(topk) || !topk.length) {
+        els.candidateList.innerHTML = `<div class="empty">No candidate retrieval shown for this turn.</div>`;
+        return;
+      }
+
+      els.candidateList.innerHTML = topk.map(item => {
+        const summary = item.summary || {};
+        const desc = summary.description || summary.dataset || "";
+        return `
+          <div class="candidate-item">
+            <div class="candidate-top">
+              <div class="candidate-name">${escapeHtml(item.dataset || "unknown")}</div>
+              <div class="candidate-score">score ${Number(item.score ?? 0).toFixed(4)}</div>
+            </div>
+            <div class="candidate-desc">${escapeHtml(desc)}</div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderState() {
+      els.currentDatasetValue.textContent = state.dataset || "None";
+      els.selectedAttributeValue.textContent = state.currentAttributes.length ? state.currentAttributes.join(", ") : "None";
+      els.interactionIdValue.textContent = state.interactionId || "None";
+
+      els.styleDatasetValue.textContent = state.dataset || "None";
+      els.styleAttributeValue.textContent = state.currentStyle?.target_attribute || "None";
+      els.styleTypeValue.textContent = state.currentStyle?.style_type || "Default";
+      els.legendTitleValue.textContent = state.currentStyle?.legend_title || "None";
+
+      const colors = state.currentStyle?.color_theme?.colors || [];
+      els.swatches.innerHTML = colors.length
+        ? colors.map(c => `<span class="swatch" style="background:${escapeAttr(c)}"></span>`).join("")
+        : `<span class="empty">No palette yet.</span>`;
+
+      const r = state.currentStyle?.renderer;
+      if (!r) {
+        els.rendererDetailsValue.textContent = "No LLM style has been applied yet.";
+      } else if (r.mode === "gradient") {
+        els.rendererDetailsValue.textContent = `Gradient on ${r.attribute || "attribute"} from ${r.min} to ${r.max}.`;
+      } else if (r.mode === "categorical") {
+        const count = Array.isArray(r.stops) ? r.stops.length : 0;
+        els.rendererDetailsValue.textContent = `Categorical mapping on ${r.attribute || "attribute"} with ${count} category stop${count === 1 ? "" : "s"}.`;
+      } else if (r.mode === "single") {
+        els.rendererDetailsValue.textContent = `Single-color style${r.attribute ? ` using ${r.attribute}` : ""}.`;
+      } else {
+        els.rendererDetailsValue.textContent = "Custom renderer.";
+      }
+    }
+
+    function applyStyle(style) {
+      state.currentStyle = style || null;
+      renderState();
+
+      if (!map.getLayer("dataset-fill")) return;
+
+      if (!style || !style.renderer) {
+        map.setPaintProperty("dataset-fill", "fill-color", defaultFillStyle()["fill-color"]);
+        map.setPaintProperty("dataset-fill", "fill-opacity", defaultFillStyle()["fill-opacity"]);
+        map.setPaintProperty("dataset-fill", "fill-outline-color", defaultFillStyle()["fill-outline-color"]);
+
+        map.setPaintProperty("dataset-line", "line-color", defaultLineStyle()["line-color"]);
+        map.setPaintProperty("dataset-line", "line-width", defaultLineStyle()["line-width"]);
+        map.setPaintProperty("dataset-line", "line-opacity", defaultLineStyle()["line-opacity"]);
+
+        map.setPaintProperty("dataset-point", "circle-color", defaultCircleStyle()["circle-color"]);
+        map.setPaintProperty("dataset-point", "circle-radius", defaultCircleStyle()["circle-radius"]);
+        map.setPaintProperty("dataset-point", "circle-stroke-color", defaultCircleStyle()["circle-stroke-color"]);
+        map.setPaintProperty("dataset-point", "circle-stroke-width", defaultCircleStyle()["circle-stroke-width"]);
+        map.setPaintProperty("dataset-point", "circle-opacity", defaultCircleStyle()["circle-opacity"]);
+        return;
+      }
+
+      const renderer = style.renderer;
+      const mode = renderer.mode || "single";
+      const geometryKind = style.geometry_kind || "line";
+      const attr = renderer.attribute || style.target_attribute || "";
+      const opacity = Number(style.opacity ?? 1);
+      const strokeWidth = Number(style.stroke_width ?? 2);
+      const radius = Number(style.radius ?? 4);
+      const colors = Array.isArray(style.color_theme?.colors) ? style.color_theme.colors : [];
+
+      if (geometryKind === "polygon") {
+        if (mode === "single") {
+          const color = renderer.color || colors[0] || "#4f89ff";
+          map.setPaintProperty("dataset-fill", "fill-color", color);
+          map.setPaintProperty("dataset-fill", "fill-opacity", opacity);
+          map.setPaintProperty("dataset-fill", "fill-outline-color", color);
+        } else if (mode === "categorical") {
+          const stops = Array.isArray(renderer.stops) ? renderer.stops : [];
+          const expr = ["match", ["to-string", ["get", attr]]];
+          stops.forEach(s => {
+            expr.push(String(s.value));
+            expr.push(s.color);
+          });
+          expr.push(renderer.fallback_color || colors[0] || "#4f89ff");
+          map.setPaintProperty("dataset-fill", "fill-color", expr);
+          map.setPaintProperty("dataset-fill", "fill-opacity", opacity);
+          map.setPaintProperty("dataset-fill", "fill-outline-color", renderer.fallback_color || colors[0] || "#4f89ff");
+        } else if (mode === "gradient") {
+          const gradExpr = ["interpolate", ["linear"], ["coalesce", ["to-number", ["get", attr]], Number(renderer.min || 0)]];
+          const gradColors = Array.isArray(renderer.colors) && renderer.colors.length ? renderer.colors : ["#f7fbff", "#08306b"];
+          const min = Number(renderer.min ?? 0);
+          const max = Number(renderer.max ?? 1);
+          if (gradColors.length === 1) {
+            gradExpr.push(min, gradColors[0], max, gradColors[0]);
+          } else {
+            gradColors.forEach((c, i) => {
+              const stop = min + ((max - min) * i / (gradColors.length - 1));
+              gradExpr.push(stop, c);
+            });
+          }
+          map.setPaintProperty("dataset-fill", "fill-color", gradExpr);
+          map.setPaintProperty("dataset-fill", "fill-opacity", opacity);
+          map.setPaintProperty("dataset-fill", "fill-outline-color", gradColors[gradColors.length - 1] || "#4f89ff");
+        }
+
+        map.setPaintProperty("dataset-line", "line-color", "#1d2430");
+        map.setPaintProperty("dataset-line", "line-width", Math.max(0.5, strokeWidth));
+        map.setPaintProperty("dataset-line", "line-opacity", Math.min(1, opacity + 0.1));
+      } else if (geometryKind === "point") {
+        if (mode === "single") {
+          const color = renderer.color || colors[0] || "#6f8cff";
+          map.setPaintProperty("dataset-point", "circle-color", color);
+        } else if (mode === "categorical") {
+          const stops = Array.isArray(renderer.stops) ? renderer.stops : [];
+          const expr = ["match", ["to-string", ["get", attr]]];
+          stops.forEach(s => {
+            expr.push(String(s.value));
+            expr.push(s.color);
+          });
+          expr.push(renderer.fallback_color || colors[0] || "#6f8cff");
+          map.setPaintProperty("dataset-point", "circle-color", expr);
+        } else if (mode === "gradient") {
+          const gradExpr = ["interpolate", ["linear"], ["coalesce", ["to-number", ["get", attr]], Number(renderer.min || 0)]];
+          const gradColors = Array.isArray(renderer.colors) && renderer.colors.length ? renderer.colors : ["#f7fbff", "#08306b"];
+          const min = Number(renderer.min ?? 0);
+          const max = Number(renderer.max ?? 1);
+          if (gradColors.length === 1) {
+            gradExpr.push(min, gradColors[0], max, gradColors[0]);
+          } else {
+            gradColors.forEach((c, i) => {
+              const stop = min + ((max - min) * i / (gradColors.length - 1));
+              gradExpr.push(stop, c);
+            });
+          }
+          map.setPaintProperty("dataset-point", "circle-color", gradExpr);
+        }
+
+        map.setPaintProperty("dataset-point", "circle-radius", Math.max(2, radius));
+        map.setPaintProperty("dataset-point", "circle-opacity", opacity);
+        map.setPaintProperty("dataset-point", "circle-stroke-color", "#ffffff");
+        map.setPaintProperty("dataset-point", "circle-stroke-width", 1);
+      } else {
+        if (mode === "single") {
+          const color = renderer.color || colors[0] || "#3ea0ff";
+          map.setPaintProperty("dataset-line", "line-color", color);
+        } else if (mode === "categorical") {
+          const stops = Array.isArray(renderer.stops) ? renderer.stops : [];
+          const expr = ["match", ["to-string", ["get", attr]]];
+          stops.forEach(s => {
+            expr.push(String(s.value));
+            expr.push(s.color);
+          });
+          expr.push(renderer.fallback_color || colors[0] || "#3ea0ff");
+          map.setPaintProperty("dataset-line", "line-color", expr);
+        } else if (mode === "gradient") {
+          const gradExpr = ["interpolate", ["linear"], ["coalesce", ["to-number", ["get", attr]], Number(renderer.min || 0)]];
+          const gradColors = Array.isArray(renderer.colors) && renderer.colors.length ? renderer.colors : ["#f7fbff", "#08306b"];
+          const min = Number(renderer.min ?? 0);
+          const max = Number(renderer.max ?? 1);
+          if (gradColors.length === 1) {
+            gradExpr.push(min, gradColors[0], max, gradColors[0]);
+          } else {
+            gradColors.forEach((c, i) => {
+              const stop = min + ((max - min) * i / (gradColors.length - 1));
+              gradExpr.push(stop, c);
+            });
+          }
+          map.setPaintProperty("dataset-line", "line-color", gradExpr);
+        }
+
+        map.setPaintProperty("dataset-line", "line-width", Math.max(0.6, strokeWidth));
+        map.setPaintProperty("dataset-line", "line-opacity", opacity);
+      }
+    }
+
+    async function sendPrompt(promptText) {
+      const query = String(promptText || "").trim();
+      if (!query) return;
+
+      addMessage("user", query);
+      setSending(true);
+
+      const payload = {
+        query,
+        interaction_id: state.interactionId || "",
+        current_dataset: DATASET_ID,
+        current_attributes: state.currentAttributes || [],
+        current_style: state.currentStyle || {},
+        k: 5
+      };
+
+      try {
+        const resp = await fetch("/api/chat-style", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          throw new Error(data.error || `Request failed with status ${resp.status}`);
+        }
+
+        state.interactionId = data.interaction_id || "";
+        state.currentAttributes = Array.isArray(data.selected_attributes) ? data.selected_attributes : [];
+        state.currentStyle = data.style || null;
+
+        renderCandidates(data.top_k || []);
+        renderState();
+        applyStyle(state.currentStyle);
+
+        addMessage("assistant", data.assistant_response || "Done.");
+        if (Array.isArray(data.style?.notes) && data.style.notes.length) {
+          addMessage("assistant", "Notes:\n- " + data.style.notes.join("\n- "));
+        }
+      } catch (err) {
+        console.error(err);
+        addMessage("assistant", `Error: ${err.message}`);
+        showToast(err.message || "Prompt failed.", true);
+      } finally {
+        setSending(false);
+      }
+    }
+
+    function resetConversation() {
+      state.interactionId = "";
+      state.currentAttributes = [];
+      state.currentStyle = null;
+      renderCandidates([]);
+      renderState();
+      applyStyle(null);
+      els.chatLog.innerHTML = "";
+      addMessage("assistant", `Conversation reset for ${DATASET_NAME}. Try:\ncolor this dataset based on a meaningful attribute`);
+      showToast("Conversation reset.");
+    }
+
+    els.sendBtn.addEventListener("click", () => {
+      const text = els.chatInput.value;
+      if (!text.trim()) return;
+      els.chatInput.value = "";
+      sendPrompt(text);
+    });
+
+    els.chatInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        els.sendBtn.click();
+      }
+    });
+
+    els.clearInputBtn.addEventListener("click", () => {
+      els.chatInput.value = "";
+      els.chatInput.focus();
+    });
+
+    els.resetChatBtn.addEventListener("click", resetConversation);
+    els.fitBoundsBtn.addEventListener("click", fitBoundsSoft);
+    els.homeBtn.addEventListener("click", () => {
+      window.location.href = "/";
+    });
+
+    document.querySelectorAll(".prompt-chip").forEach(btn => {
+      btn.addEventListener("click", () => {
+        els.chatInput.value = btn.getAttribute("data-prompt") || "";
+        els.chatInput.focus();
+      });
+    });
+
+    map.on("error", e => console.error("[MapLibre error]", e));
+
+    loadStats();
+    renderState();
+    resetConversation();
+  </script>
+</body>
+</html>
