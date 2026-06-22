@@ -16,12 +16,18 @@ from flask import Flask, Response, render_template, request, send_from_directory
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 
-from .catalog.embedder import GeminiTextEmbedder
+from .catalog.embedder import get_embedder
 from .catalog.index import CATALOG_FILENAME, build_catalog_index
 from .catalog.pgvector_store import PgVectorConfig, PgVectorStore
 from .catalog.router import CatalogRouter, SearchBackend
 from .download_service import DatasetFeatureService
-from .llm import continue_style_conversation, generate_map_code, start_style_conversation
+from .llm import (
+    continue_style_conversation,
+    generate_map_code,
+    start_multilayer_conversation,
+    start_style_conversation,
+)
+from .llm.provider import LLMProviderError
 from .tiler.tiler import VectorTiler
 
 try:
@@ -183,6 +189,7 @@ def create_app(
             outdir = data_root / dataset_name
             outdir.parent.mkdir(parents=True, exist_ok=True)
 
+            build_t0 = perf_counter()
             tile_result, mvt_result = starlet_build(
                 input=str(uploaded_file_path),
                 outdir=str(outdir),
@@ -190,6 +197,7 @@ def create_app(
                 zoom=zoom,
                 threshold=threshold,
             )
+            build_seconds = perf_counter() - build_t0
 
             tiler_cache.pop(dataset_name, None)
             _catalog_runtime["router"] = None
@@ -198,7 +206,8 @@ def create_app(
             _set_build_job(
                 job_id,
                 step="building_index",
-                message="Tiles generated. Rebuilding catalogue index...",
+                message=f"Tiles generated in {build_seconds:.1f}s. Rebuilding catalogue index...",
+                build_seconds=round(build_seconds, 2),
                 tile_result={
                     "outdir": str(getattr(tile_result, "outdir", outdir)),
                     "num_files": getattr(tile_result, "num_files", None),
@@ -212,22 +221,43 @@ def create_app(
                 },
             )
 
+            index_t0 = perf_counter()
             catalog = build_catalog_index(
                 data_root=data_root,
                 out_dir=data_root / "_catalog",
                 sync_pgvector=sync_pgvector,
             )
+            index_seconds = perf_counter() - index_t0
 
             _catalog_runtime["router"] = None
             _catalog_runtime["mtime"] = None
+
+            # Persist preprocessing timings so they can be reported later
+            # (reviewers asked for preprocessing time, not just query-time latency).
+            try:
+                with open(outdir / "preprocessing.json", "w", encoding="utf-8") as f:
+                    json.dump({
+                        "build_seconds": round(build_seconds, 2),
+                        "index_seconds": round(index_seconds, 2),
+                        "num_tiles": getattr(tile_result, "num_files", None),
+                        "total_rows": getattr(tile_result, "total_rows", None),
+                        "mvt_tiles": getattr(mvt_result, "tile_count", None),
+                    }, f, indent=2)
+            except Exception:
+                logger.exception("Failed to persist preprocessing timings for %s", dataset_name)
 
             _set_build_job(
                 job_id,
                 status="completed",
                 step="done",
-                message="Dataset uploaded, tiled, and indexed successfully.",
+                message=(
+                    f"Dataset uploaded, tiled ({build_seconds:.1f}s), and indexed "
+                    f"({index_seconds:.1f}s) successfully."
+                ),
                 dataset=dataset_name,
                 output_dir=str(outdir),
+                build_seconds=round(build_seconds, 2),
+                index_seconds=round(index_seconds, 2),
                 catalog_entry_count=catalog.get("entry_count", 0),
             )
 
@@ -267,7 +297,39 @@ def create_app(
                 "Build it first with catalog/index.py."
             )
 
-        embedder = GeminiTextEmbedder()
+        embedder = get_embedder()
+
+        # Self-heal: the on-disk embeddings must share the active embedder's
+        # vector space, otherwise cosine similarity is meaningless (or crashes
+        # on a dimension mismatch). This happens whenever the key state flips
+        # between runs (e.g. Gemini index served with the local fallback, or
+        # vice-versa). Detect a mismatch and rebuild the index in place.
+        try:
+            with open(index_path, "r", encoding="utf-8") as f:
+                stored = json.load(f)
+            stored_id = stored.get("embedder_id")
+            stored_dim = stored.get("embedding_dim")
+            active_id = getattr(embedder, "embedder_id", None)
+            active_dim = getattr(embedder, "embedding_dim", None)
+            mismatch = (
+                (stored_id is not None and active_id is not None and stored_id != active_id)
+                or (stored_dim is not None and active_dim is not None and int(stored_dim) != int(active_dim))
+            )
+            if mismatch:
+                logger.warning(
+                    "[Catalog] Stored embedder (%s, dim=%s) differs from active "
+                    "embedder (%s, dim=%s); rebuilding catalogue index.",
+                    stored_id, stored_dim, active_id, active_dim,
+                )
+                build_catalog_index(
+                    data_root=data_root,
+                    out_dir=data_root / "_catalog",
+                    embedder=embedder,
+                    sync_pgvector=False,
+                )
+        except Exception:
+            logger.exception("[Catalog] Could not verify/repair embedder compatibility")
+
         backend = _catalog_backend_from_env()
 
         pg_store = None
@@ -363,6 +425,18 @@ def create_app(
         size = sum(f.stat().st_size for f in dataset_path.rglob("*") if f.is_file())
         file_count = sum(1 for f in dataset_path.rglob("*") if f.is_file())
 
+        bbox = None
+        geometry_kind = "unknown"
+        try:
+            from catalyst._types import Dataset as _Dataset
+            bbox = _Dataset(str(dataset_path)).bbox
+        except Exception:
+            bbox = None
+        try:
+            geometry_kind = _infer_geometry_kind_from_summary(_dataset_summary_for_llm(dataset))
+        except Exception:
+            geometry_kind = "unknown"
+
         return {
             "id": dataset,
             "name": dataset.replace("_", " ").title(),
@@ -370,6 +444,8 @@ def create_app(
             "size_human": _human_size(size),
             "file_count": file_count,
             "path": str(dataset_path),
+            "bbox": list(bbox) if bbox else None,
+            "geometry_kind": geometry_kind,
         }
 
     def _list_dataset_metadata(query: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -660,6 +736,215 @@ def create_app(
             )
         return payload
 
+    # ----- Cross-dataset overlay (novelty) -----------------------------------
+    # Distinct per-layer color ramps so overlaid datasets stay visually separable.
+    _LAYER_THEMES = [
+        {"name": "blues", "colors": ["#eff3ff", "#bdd7e7", "#6baed6", "#3182bd", "#08519c"]},
+        {"name": "oranges", "colors": ["#feedde", "#fdbe85", "#fd8d3c", "#e6550d", "#a63603"]},
+        {"name": "greens", "colors": ["#edf8e9", "#bae4b3", "#74c476", "#31a354", "#006d2c"]},
+    ]
+    _LAYER_SOLID = ["#3182bd", "#e6550d", "#31a354"]
+    _GEOM_PREFIX = {"polygon": "fill", "line": "line", "point": "circle", "unknown": "fill"}
+    _GEOM_ORDER = {"polygon": 0, "line": 1, "point": 2, "unknown": 1}
+
+    def _safe_geometry_kind(dataset: str) -> str:
+        try:
+            return _infer_geometry_kind_from_summary(_dataset_summary_for_llm(dataset))
+        except Exception:
+            return "unknown"
+
+    def _heuristic_pick_attribute(query: str, summary: Dict[str, Any]) -> Tuple[str, str]:
+        """Pick (target_attribute, render_mode) from query intent + attribute roles."""
+        q = (query or "").lower()
+        attrs = summary.get("attributes") or []
+        numeric = [a for a in attrs if _attribute_role_from_summary(a) == "numeric"]
+        categorical = [
+            a for a in attrs
+            if _attribute_role_from_summary(a) in {"categorical", "categorical_text"}
+        ]
+        wants_cat = any(w in q for w in (
+            "type", "types", "categor", "class", "kind", "group", "species", "land use", "landuse",
+        ))
+        wants_grad = any(w in q for w in (
+            "density", "magnitude", "gradient", "heat", "amount", "count", "population",
+            "by area", "size", "level", "value", "intensity", "elevation",
+        ))
+        if wants_cat and categorical:
+            return categorical[0]["name"], "categorical"
+        if wants_grad and numeric:
+            return numeric[0]["name"], "gradient"
+        if categorical:
+            return categorical[0]["name"], "categorical"
+        if numeric:
+            return numeric[0]["name"], "gradient"
+        return "", "single"
+
+    def _normalized_layer_for(
+        dataset: str,
+        *,
+        query: str = "",
+        layer_index: int = 0,
+        total_layers: int = 1,
+        score: float = 0.0,
+        reason: str = "",
+        raw_style: Optional[Dict[str, Any]] = None,
+        selected_attributes: Optional[List[str]] = None,
+        style_intent: str = "",
+    ) -> Dict[str, Any]:
+        """Build one response layer (normalized style) for the overlay.
+
+        If ``raw_style`` is provided (LLM path) it is normalized as-is; otherwise a
+        style is synthesized heuristically from the query and attribute roles.
+        """
+        summary = _dataset_summary_for_llm(dataset)
+        geom = _infer_geometry_kind_from_summary(summary)
+        prefix = _GEOM_PREFIX.get(geom, "fill")
+
+        if raw_style is None:
+            target, mode = _heuristic_pick_attribute(query, summary)
+            style_type = f"{prefix}-{mode}"
+            if mode == "categorical":
+                theme = {"name": "category", "colors": _categorical_palette()}
+            elif mode == "gradient":
+                theme = _LAYER_THEMES[layer_index % len(_LAYER_THEMES)]
+            else:
+                theme = {"name": "solid", "colors": [_LAYER_SOLID[layer_index % len(_LAYER_SOLID)]]}
+            # Bottom polygon layers get lower opacity so upper layers show through.
+            opacity = 0.55 if (geom == "polygon" and total_layers > 1) else 0.85
+            raw_style = {
+                "target_attribute": target,
+                "style_type": style_type,
+                "color_theme": theme,
+                "opacity": opacity,
+                "stroke_width": 2.5 if geom == "line" else 1.5,
+                "radius": 3.5,
+                "legend_title": target or dataset.replace("_", " ").title(),
+                "notes": [reason] if reason else [],
+            }
+            if not selected_attributes:
+                selected_attributes = [target] if target else []
+            if not style_intent:
+                style_intent = f"heuristic {style_type} for {dataset}"
+
+        normalized = _normalize_style_for_client(
+            dataset=dataset,
+            dataset_summary=summary,
+            style=raw_style,
+        )
+        return {
+            "dataset": dataset,
+            "score": round(float(score), 6),
+            "reason": _normalize_unicode_text(reason),
+            "geometry_kind": geom,
+            "selected_attributes": [_normalize_unicode_text(x) for x in (selected_attributes or [])],
+            "style_intent": _normalize_unicode_text(style_intent),
+            "style": normalized,
+        }
+
+    def _select_overlay_candidates(candidates, max_layers: int = 3) -> List[Any]:
+        """Pick the jointly-relevant subset, ordered bottom (areas) -> top (points).
+
+        A candidate joins the overlay when its similarity is a meaningful fraction
+        of the best match (relative threshold) and clears a small absolute floor
+        (to avoid pulling in clearly-irrelevant datasets). The top match is always
+        included. Lexical/embedding scores are noisy, so the relative threshold is
+        deliberately permissive — the goal is to surface jointly-relevant datasets
+        for overlay, which is exactly the cross-dataset behaviour reviewers asked
+        Catalyst to demonstrate.
+        """
+        if not candidates:
+            return []
+        top = float(candidates[0].score)
+        rel_floor = 0.4 * top
+        abs_floor = 0.04
+        chosen = []
+        for i, c in enumerate(candidates):
+            score = float(c.score)
+            if i == 0 or (score >= rel_floor and score >= abs_floor):
+                chosen.append(c)
+            if len(chosen) >= max_layers:
+                break
+        return sorted(chosen, key=lambda c: _GEOM_ORDER.get(_safe_geometry_kind(c.dataset), 1))
+
+    def _heuristic_overlay_layers(query: str, candidates, max_layers: int = 3) -> List[Dict[str, Any]]:
+        chosen = _select_overlay_candidates(candidates, max_layers=max_layers)
+        total = len(chosen)
+        layers: List[Dict[str, Any]] = []
+        for idx, c in enumerate(chosen):
+            reason = (
+                f"Top semantic match for the request."
+                if idx == 0 and c is candidates[0]
+                else f"Also relevant (similarity {float(c.score):.2f}); overlaid for context."
+            )
+            layers.append(
+                _normalized_layer_for(
+                    c.dataset,
+                    query=query,
+                    layer_index=idx,
+                    total_layers=total,
+                    score=c.score,
+                    reason=reason,
+                )
+            )
+        return layers
+
+    def _llm_overlay_layers(multi_result, candidate_by_name) -> List[Dict[str, Any]]:
+        layers: List[Dict[str, Any]] = []
+        for idx, spec in enumerate(multi_result.layers):
+            if spec.dataset not in candidate_by_name:
+                continue
+            score = float(getattr(candidate_by_name[spec.dataset], "score", 0.0))
+            layers.append(
+                _normalized_layer_for(
+                    spec.dataset,
+                    layer_index=idx,
+                    total_layers=len(multi_result.layers),
+                    score=score,
+                    reason=spec.reason,
+                    raw_style=spec.style,
+                    selected_attributes=spec.selected_attributes,
+                    style_intent=spec.style_intent,
+                )
+            )
+        return layers
+
+    def _warm_tile_render_ms(datasets: List[str]) -> Optional[float]:
+        """Render one representative tile per dataset and return the max latency.
+
+        Gives an immediate, server-measured MVT render time for the timing panel
+        (reviewers asked specifically for the MVT rendering cost), and warms the
+        on-disk/cache tiers so the first browser fetch is fast.
+        """
+        import math as _math
+
+        def _lonlat_to_tile(lon: float, lat: float, z: int) -> Tuple[int, int]:
+            lat = max(min(lat, 85.05112878), -85.05112878)
+            n = 2 ** z
+            xt = int((lon + 180.0) / 360.0 * n)
+            lat_rad = _math.radians(lat)
+            yt = int((1.0 - _math.asinh(_math.tan(lat_rad)) / _math.pi) / 2.0 * n)
+            return min(max(xt, 0), n - 1), min(max(yt, 0), n - 1)
+
+        worst: Optional[float] = None
+        for dataset in datasets:
+            try:
+                from catalyst._types import Dataset as _Dataset
+                bbox = _Dataset(str(data_root / dataset)).bbox
+                if not bbox:
+                    continue
+                cx = (bbox[0] + bbox[2]) / 2.0
+                cy = (bbox[1] + bbox[3]) / 2.0
+                z = 7
+                x, y = _lonlat_to_tile(cx, cy, z)
+                tiler = get_tiler(dataset)
+                t0 = perf_counter()
+                tiler.get_tile(z, x, y)
+                elapsed = (perf_counter() - t0) * 1000.0
+                worst = elapsed if worst is None else max(worst, elapsed)
+            except Exception:
+                logger.exception("[Overlay] tile warm failed for %s", dataset)
+        return round(worst, 3) if worst is not None else None
+
     def _looks_like_new_dataset_request(
         user_query: str,
         current_dataset: Optional[str],
@@ -713,61 +998,79 @@ def create_app(
             raise LookupError("No indexed datasets available")
 
         candidate_payload = _candidate_payload_for_llm(candidates)
+        candidate_by_name = {c.dataset: c for c in candidates}
 
+        # --- Cross-dataset overlay selection + styling --------------------------
+        # Try the LLM to compose a multi-dataset overlay; gracefully fall back to
+        # a deterministic heuristic if no provider/key is available. This keeps the
+        # whole demo runnable offline and robust to LLM outages.
         llm_t0 = perf_counter()
-        turn1 = start_style_conversation(
-            dataset="__choose_from_candidates__",
-            dataset_summary={
-                "mode": "candidate_selection",
-                "candidates": candidate_payload,
-            },
-            user_query=(
-                f"{normalized_query}\n\n"
-                "Choose the single best dataset from the provided candidates, "
-                "choose the best attribute for styling, and generate the initial style."
-            ),
-            selected_attributes=None,
-            style_intent=None,
-            provider_name="gemini",
-            temperature=0.2,
-        )
+        selection_mode = "llm"
+        assistant_response = ""
+        interaction_id = ""
+        layers: List[Dict[str, Any]] = []
+        try:
+            multi = start_multilayer_conversation(
+                candidates_summary=candidate_payload,
+                user_query=normalized_query,
+                max_layers=3,
+                provider_name="gemini",
+            )
+            layers = _llm_overlay_layers(multi, candidate_by_name)
+            if not layers:
+                raise ValueError("LLM returned no usable layers")
+            assistant_response = multi.assistant_response
+            interaction_id = _normalize_unicode_text(multi.interaction_id)
+        except (LLMProviderError, Exception) as exc:  # noqa: BLE001 - intentional broad fallback
+            logger.warning(
+                "[ChatStyle] Multilayer LLM unavailable (%s); using heuristic overlay.",
+                exc,
+            )
+            selection_mode = "heuristic"
+            layers = _heuristic_overlay_layers(normalized_query, candidates, max_layers=3)
+            names = ", ".join(l["dataset"] for l in layers)
+            if len(layers) > 1:
+                assistant_response = (
+                    f"Combined {len(layers)} relevant datasets into one map ({names}). "
+                    "Semantic search ranked these as jointly relevant to your request."
+                )
+            elif layers:
+                assistant_response = (
+                    f"Showing the most relevant dataset ({names}) for your request."
+                )
+            else:
+                assistant_response = "No relevant datasets were found for your request."
         llm_ms = (perf_counter() - llm_t0) * 1000.0
 
-        selected_dataset = _normalize_unicode_text(turn1.selected_dataset).strip()
-        candidate_by_name = {c.dataset: c for c in candidates}
-        if selected_dataset not in candidate_by_name:
-            logger.warning(
-                "[ChatStyle] LLM selected invalid dataset '%s'; falling back to top candidate '%s'",
-                selected_dataset,
-                candidates[0].dataset,
-            )
-            selected_dataset = candidates[0].dataset
+        if not layers:
+            raise LookupError("No relevant datasets for the request")
 
-        selected_candidate = candidate_by_name[selected_dataset]
-        selected_summary = selected_candidate.summary
-        normalized_style = _normalize_style_for_client(
-            dataset=selected_dataset,
-            dataset_summary=selected_summary,
-            style=turn1.style,
-        )
+        # Primary layer = highest-scoring dataset (drives the metadata panel and
+        # the backward-compatible single-dataset fields).
+        primary = max(layers, key=lambda l: l.get("score", 0.0))
+        primary_dataset = primary["dataset"]
 
-        tile_metric = _get_tile_metric(selected_dataset)
+        overlay_render_ms = _warm_tile_render_ms([l["dataset"] for l in layers])
+        tile_metric = _get_tile_metric(primary_dataset)
         total_ms = (perf_counter() - total_t0) * 1000.0
 
         response = {
             "mode": "initial",
             "query": normalized_query,
-            "interaction_id": _normalize_unicode_text(turn1.interaction_id),
-            "assistant_response": _normalize_unicode_text(turn1.assistant_response),
-            "selected_dataset": selected_dataset,
-            "selected_dataset_score": float(selected_candidate.score),
-            "selected_attributes": [_normalize_unicode_text(x) for x in (turn1.selected_attributes or [])],
-            "style_intent": _normalize_unicode_text(turn1.style_intent),
-            "style": normalized_style,
+            "interaction_id": interaction_id,
+            "assistant_response": _normalize_unicode_text(assistant_response),
+            "selection_mode": selection_mode,
+            "selected_dataset": primary_dataset,
+            "selected_dataset_score": float(primary.get("score", 0.0)),
+            "selected_attributes": primary.get("selected_attributes", []),
+            "style_intent": primary.get("style_intent", ""),
+            "style": primary["style"],
+            "layers": layers,
             "top_k": candidate_payload,
             "timings": {
                 "semantic_search_ms": round(semantic_search_ms, 3),
                 "llm_ms": round(llm_ms, 3),
+                "mvt_render_ms": overlay_render_ms,
                 "total_ms": round(total_ms, 3),
                 "last_tile_request_ms": round(float(tile_metric.get("elapsed_ms")), 3) if tile_metric and tile_metric.get("elapsed_ms") is not None else None,
             },
@@ -792,15 +1095,24 @@ def create_app(
         selected_summary = _dataset_summary_for_llm(current_dataset)
 
         llm_t0 = perf_counter()
-        turn = continue_style_conversation(
-            dataset=current_dataset,
-            user_query=normalized_query,
-            previous_interaction_id=_normalize_unicode_text(interaction_id),
-            selected_attributes_hint=[_normalize_unicode_text(x) for x in (current_attributes or [])],
-            current_style_hint=current_style or {},
-            provider_name="gemini",
-            temperature=0.2,
-        )
+        try:
+            turn = continue_style_conversation(
+                dataset=current_dataset,
+                user_query=normalized_query,
+                previous_interaction_id=_normalize_unicode_text(interaction_id),
+                selected_attributes_hint=[_normalize_unicode_text(x) for x in (current_attributes or [])],
+                current_style_hint=current_style or {},
+                provider_name="gemini",
+                temperature=0.2,
+            )
+        except (LLMProviderError, Exception) as exc:  # noqa: BLE001 - intentional broad fallback
+            # Provider unavailable mid-session (e.g. key expired): re-run the
+            # query as a fresh overlay rather than failing the turn.
+            logger.warning(
+                "[ChatStyle] Follow-up LLM unavailable (%s); restarting as overlay.",
+                exc,
+            )
+            return _run_initial_chat_turn(user_query=normalized_query, k=5)
         llm_ms = (perf_counter() - llm_t0) * 1000.0
 
         returned_dataset = _normalize_unicode_text(turn.selected_dataset).strip() or current_dataset
@@ -821,19 +1133,35 @@ def create_app(
         tile_metric = _get_tile_metric(current_dataset)
         total_ms = (perf_counter() - total_t0) * 1000.0
 
+        followup_layer = {
+            "dataset": current_dataset,
+            "score": 1.0,
+            "reason": _normalize_unicode_text(turn.style_intent),
+            "geometry_kind": _infer_geometry_kind_from_summary(selected_summary),
+            "selected_attributes": [_normalize_unicode_text(x) for x in (turn.selected_attributes or [])],
+            "style_intent": _normalize_unicode_text(turn.style_intent),
+            "style": normalized_style,
+        }
+
         response = {
             "mode": "followup",
             "query": normalized_query,
             "interaction_id": _normalize_unicode_text(turn.interaction_id),
             "assistant_response": _normalize_unicode_text(turn.assistant_response),
+            "selection_mode": "llm",
             "selected_dataset": current_dataset,
             "selected_attributes": [_normalize_unicode_text(x) for x in (turn.selected_attributes or [])],
             "style_intent": _normalize_unicode_text(turn.style_intent),
             "style": normalized_style,
+            # Single refined layer; the client merges it into the existing overlay
+            # (updating this dataset's layer, preserving the others).
+            "layers": [followup_layer],
+            "merge_layers": True,
             "top_k": [],
             "timings": {
                 "semantic_search_ms": 0.0,
                 "llm_ms": round(llm_ms, 3),
+                "mvt_render_ms": _warm_tile_render_ms([current_dataset]),
                 "total_ms": round(total_ms, 3),
                 "last_tile_request_ms": round(float(tile_metric.get("elapsed_ms")), 3) if tile_metric and tile_metric.get("elapsed_ms") is not None else None,
             },

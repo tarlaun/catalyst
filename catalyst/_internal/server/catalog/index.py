@@ -11,7 +11,7 @@ import os
 import numpy as np
 
 from .descriptor import build_dataset_descriptor
-from .embedder import GeminiTextEmbedder, TextEmbedder
+from .embedder import TextEmbedder, get_embedder
 from .pgvector_store import PgVectorConfig, PgVectorStore
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def build_catalog_index(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if embedder is None:
-        embedder = GeminiTextEmbedder()
+        embedder = get_embedder()
 
     if sync_pgvector is None:
         sync_pgvector = _pgvector_enabled()
@@ -116,6 +116,8 @@ def build_catalog_index(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "data_root": str(data_root),
         "embedding_model": getattr(embedder, "model_name", None),
+        "embedder_id": getattr(embedder, "embedder_id", None),
+        "embedding_dim": int(emb_array.shape[1]) if emb_array.ndim == 2 and emb_array.shape[0] else getattr(embedder, "embedding_dim", None),
         "embedding_file": CATALOG_EMBEDDINGS_FILENAME,
         "entry_count": len(metadata_entries),
         "entries": metadata_entries,

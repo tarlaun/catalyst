@@ -661,10 +661,19 @@
                     <div class="metric-value" id="timingLlmMs">—</div>
                 </div>
                 <div class="metric">
+                    <div class="metric-label">MVT Render Time</div>
+                    <div class="metric-value" id="timingRenderMs">—</div>
+                </div>
+                <div class="metric">
                     <div class="metric-label">Total Request Time</div>
                     <div class="metric-value" id="timingTotalMs">—</div>
                 </div>
             </div>
+        </section>
+
+        <section class="card">
+            <h2 class="section-title">Active Map Layers <span id="overlayBadge" class="chip" style="display:none;"></span></h2>
+            <div id="layersPanel" class="small">No layers yet.</div>
         </section>
 
         <section class="card">
@@ -685,8 +694,8 @@
     </aside>
 
     <main class="map-pane">
-        <div class="top-badge">iframe runtime: <code>/map.html</code></div>
-        <iframe id="mapFrame" src="/map.html" title="Map runtime"></iframe>
+        <div class="top-badge">sandboxed iframe runtime: <code>/map.html</code></div>
+        <iframe id="mapFrame" src="/map.html" title="Map runtime" sandbox="allow-scripts"></iframe>
     </main>
 </div>
 
@@ -699,6 +708,7 @@
         lastAssistantResponse: "",
         topK: [],
         timings: null,
+        layers: [],
         datasetInspection: null,
         datasetsCatalog: []
     };
@@ -739,7 +749,10 @@
         metaDescription: document.getElementById("metaDescription"),
         timingSearchMs: document.getElementById("timingSearchMs"),
         timingLlmMs: document.getElementById("timingLlmMs"),
-        timingTotalMs: document.getElementById("timingTotalMs")
+        timingRenderMs: document.getElementById("timingRenderMs"),
+        timingTotalMs: document.getElementById("timingTotalMs"),
+        layersPanel: document.getElementById("layersPanel"),
+        overlayBadge: document.getElementById("overlayBadge")
     };
 
     let mapFrameReady = false;
@@ -799,6 +812,40 @@
         els.assistantBox.textContent = state.lastAssistantResponse || "No response yet.";
         renderTopK();
         renderTimings();
+        renderLayers();
+    }
+
+    function renderLayers() {
+        const layers = Array.isArray(state.layers) ? state.layers : [];
+        if (!layers.length) {
+            els.layersPanel.innerHTML = "No layers yet.";
+            els.overlayBadge.style.display = "none";
+            return;
+        }
+        if (layers.length > 1) {
+            els.overlayBadge.textContent = `cross-dataset overlay · ${layers.length}`;
+            els.overlayBadge.style.display = "inline-block";
+        } else {
+            els.overlayBadge.style.display = "none";
+        }
+        // Render top layer first for readability.
+        els.layersPanel.innerHTML = layers.slice().reverse().map(layer => {
+            const renderer = (layer.style && layer.style.renderer) || {};
+            let swatch = "#4f83ff";
+            if (renderer.mode === "single") swatch = renderer.color || swatch;
+            else if (renderer.mode === "categorical") swatch = (renderer.stops && renderer.stops[0] && renderer.stops[0].color) || renderer.fallback_color || swatch;
+            else if (renderer.mode === "gradient") swatch = (renderer.colors && renderer.colors[renderer.colors.length - 1]) || swatch;
+            const attr = (layer.style && layer.style.target_attribute) || "";
+            const reason = layer.reason || "";
+            return `
+              <div style="display:flex; gap:8px; align-items:flex-start; margin:6px 0;">
+                <span style="width:14px;height:14px;border-radius:3px;flex:0 0 auto;margin-top:2px;border:1px solid rgba(0,0,0,.15);background:${swatch}"></span>
+                <div>
+                  <div><b>${escapeHtml(layer.dataset)}</b> <span class="small">${escapeHtml(layer.geometry_kind || "")}${attr ? " · " + escapeHtml(attr) : ""}</span></div>
+                  ${reason ? `<div class="small" style="opacity:.75">${escapeHtml(reason)}</div>` : ""}
+                </div>
+              </div>`;
+        }).join("");
     }
 
     function renderTopK() {
@@ -828,6 +875,7 @@
         const t = state.timings || {};
         els.timingSearchMs.textContent = formatMs(t.semantic_search_ms);
         els.timingLlmMs.textContent = formatMs(t.llm_ms);
+        els.timingRenderMs.textContent = formatMs(t.mvt_render_ms);
         els.timingTotalMs.textContent = formatMs(t.total_ms);
     }
 
@@ -935,7 +983,10 @@
     function postToMap(message) {
         const frame = els.mapFrame;
         if (!frame || !frame.contentWindow || !mapFrameReady) return false;
-        frame.contentWindow.postMessage(message, window.location.origin);
+        // The runtime iframe is sandboxed without allow-same-origin, so it has an
+        // opaque ("null") origin. Target "*" (payloads carry no secrets); the
+        // runtime authenticates us by window identity, not origin string.
+        frame.contentWindow.postMessage(message, "*");
         return true;
     }
 
@@ -945,6 +996,17 @@
     }
 
     function applyStateToMap() {
+        // Cross-dataset overlay path: render the whole layer stack at once.
+        if (Array.isArray(state.layers) && state.layers.length) {
+            postToMap({
+                type: "starlet:set-layers",
+                payload: {
+                    layers: state.layers.map(l => ({ dataset: l.dataset, style: l.style }))
+                }
+            });
+            return;
+        }
+
         if (!state.dataset) {
             postToMap({ type: "starlet:reset" });
             return;
@@ -1008,8 +1070,20 @@
         state.selectedAttributes = Array.isArray(data.selected_attributes) ? data.selected_attributes : [];
         state.currentStyle = data.style || state.currentStyle || null;
         state.lastAssistantResponse = data.assistant_response || "";
-        state.topK = Array.isArray(data.top_k) ? data.top_k : [];
+        // Preserve the candidate table across follow-up turns (which return none).
+        state.topK = Array.isArray(data.top_k) && data.top_k.length ? data.top_k : state.topK;
         state.timings = data.timings || null;
+
+        // Cross-dataset overlay: either replace the whole stack (initial turn) or
+        // merge a single refined layer into the existing overlay (follow-up).
+        const incomingLayers = Array.isArray(data.layers) ? data.layers : [];
+        if (data.merge_layers && Array.isArray(state.layers) && state.layers.length) {
+            const byName = new Map(state.layers.map(l => [l.dataset, l]));
+            incomingLayers.forEach(l => byName.set(l.dataset, l));
+            state.layers = Array.from(byName.values());
+        } else if (incomingLayers.length) {
+            state.layers = incomingLayers;
+        }
 
         if (state.dataset) {
             els.datasetSelect.value = state.dataset;
@@ -1147,6 +1221,7 @@
                     state.lastAssistantResponse = `Dataset ${dataset} is ready. You can style it now.`;
                     state.topK = [];
                     state.timings = null;
+                    state.layers = [];
                     updateStatus();
                     applyStateToMap();
                     await loadDatasetsCatalog(dataset);
@@ -1274,6 +1349,7 @@
         state.interactionId = "";
         state.selectedAttributes = [];
         state.currentStyle = null;
+        state.layers = [];
         updateStatus();
         applyStateToMap();
         await inspectDataset(dataset);
@@ -1286,7 +1362,9 @@
     });
 
     window.addEventListener("message", (event) => {
-        if (event.origin !== window.location.origin) return;
+        // Authenticate the sandboxed (null-origin) runtime by window identity
+        // rather than origin string.
+        if (event.source !== els.mapFrame.contentWindow) return;
         const data = event.data || {};
 
         if (data.type === "starlet:runtime-ready" || data.type === "starlet:pong") {

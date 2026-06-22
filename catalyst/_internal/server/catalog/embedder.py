@@ -2,16 +2,32 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import Iterable, List, Optional, Sequence
+import hashlib
 import json
 import logging
 import math
 import os
+import re
+import ssl
 import urllib.error
 import urllib.request
 
 logger = logging.getLogger(__name__)
 
+
+def _ssl_context() -> Optional["ssl.SSLContext"]:
+    """SSL context backed by certifi (stock macOS python lacks system CAs)."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        try:
+            return ssl.create_default_context()
+        except Exception:
+            return None
+
 _ENV_KEY = "GEMINI_API_KEY"
+_EMBEDDER_ENV = "CATALOG_EMBEDDER"  # "auto" (default) | "gemini" | "local"
 _DEFAULT_MODEL = os.environ.get("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
 _GEMINI_EMBED_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -76,6 +92,14 @@ class GeminiTextEmbedder(TextEmbedder):
     def model_name(self) -> str:
         return self._model
 
+    @property
+    def embedding_dim(self) -> Optional[int]:
+        return self._output_dimensionality
+
+    @property
+    def embedder_id(self) -> str:
+        return f"gemini:{self._model}:{self._output_dimensionality}"
+
     def embed_query(self, text: str) -> List[float]:
         return self._embed(
             text=text,
@@ -127,7 +151,7 @@ class GeminiTextEmbedder(TextEmbedder):
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=60, context=_ssl_context()) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
@@ -150,3 +174,96 @@ class GeminiTextEmbedder(TextEmbedder):
             ) from exc
 
         return normalize_vector([float(v) for v in values])
+
+
+class LocalTextEmbedder(TextEmbedder):
+    """Dependency-free, deterministic text embedder for offline operation.
+
+    Uses signed feature hashing over word tokens plus character tri-grams,
+    producing a fixed-dimensional L2-normalized vector. This requires no API
+    key or network access, so the catalogue can be (re)built and searched even
+    when ``GEMINI_API_KEY`` is missing or expired (e.g. at a demo booth with no
+    internet). Similarity is lexical rather than deeply semantic, but it is
+    more than sufficient to route distinctive geospatial queries (``roads``,
+    ``vegetation``, ``buildings``) to the right datasets, and it serves as a
+    graceful fallback whenever the Gemini embedder is unavailable.
+    """
+
+    def __init__(self, dim: int = 512):
+        self._dim = int(dim)
+
+    @property
+    def model_name(self) -> str:
+        return f"local-hash-{self._dim}"
+
+    @property
+    def embedding_dim(self) -> int:
+        return self._dim
+
+    @property
+    def embedder_id(self) -> str:
+        return f"local-hash:{self._dim}"
+
+    def _features(self, text: str) -> List[str]:
+        tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
+        feats: List[str] = []
+        for tok in tokens:
+            feats.append(f"w:{tok}")
+            padded = f"#{tok}#"
+            for i in range(len(padded) - 2):
+                feats.append(f"g:{padded[i:i + 3]}")
+        return feats
+
+    def _hash_features(self, feats: Iterable[str]) -> List[float]:
+        vec = [0.0] * self._dim
+        for feat in feats:
+            digest = hashlib.md5(feat.encode("utf-8")).digest()
+            bucket = int.from_bytes(digest[:4], "big") % self._dim
+            sign = 1.0 if digest[4] & 1 else -1.0
+            vec[bucket] += sign
+        return normalize_vector(vec)
+
+    def embed_query(self, text: str) -> List[float]:
+        if not (text or "").strip():
+            raise ValueError("Cannot embed empty text")
+        return self._hash_features(self._features(text))
+
+    def embed_document(self, text: str, title: Optional[str] = None) -> List[float]:
+        if not (text or "").strip() and not (title or "").strip():
+            raise ValueError("Cannot embed empty text")
+        feats = self._features(text)
+        if title:
+            # Weight the dataset title heavily so a query that names the dataset
+            # (or its theme) reliably retrieves it.
+            for _ in range(3):
+                feats.extend(self._features(title))
+        return self._hash_features(feats)
+
+
+def get_embedder(prefer: Optional[str] = None) -> TextEmbedder:
+    """Return the catalogue embedder, honouring CATALOG_EMBEDDER / key presence.
+
+    Selection order:
+      - explicit ``prefer`` / ``CATALOG_EMBEDDER`` of "local" or "gemini" wins;
+      - "auto" (default) uses Gemini when ``GEMINI_API_KEY`` is set and the
+        provider constructs cleanly, otherwise falls back to the local embedder.
+    """
+    choice = (prefer or os.environ.get(_EMBEDDER_ENV, "auto")).strip().lower()
+    if choice == "local":
+        return LocalTextEmbedder()
+    if choice == "gemini":
+        return GeminiTextEmbedder()
+    # auto
+    if os.environ.get(_ENV_KEY):
+        try:
+            return GeminiTextEmbedder()
+        except Exception:
+            logger.warning(
+                "Gemini embedder unavailable; falling back to LocalTextEmbedder."
+            )
+    else:
+        logger.info(
+            "%s not set; using LocalTextEmbedder for catalogue embeddings.",
+            _ENV_KEY,
+        )
+    return LocalTextEmbedder()

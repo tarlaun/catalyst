@@ -23,6 +23,24 @@ class StyleConversationResult:
 
 
 @dataclass
+class LayerStyleSpec:
+    """One dataset layer within a cross-dataset overlay."""
+    dataset: str
+    reason: str
+    selected_attributes: List[str]
+    style_intent: str
+    style: Dict[str, Any]
+
+
+@dataclass
+class MultiLayerStyleResult:
+    """Result of selecting and styling 1..N jointly-relevant datasets."""
+    assistant_response: str
+    layers: List[LayerStyleSpec]
+    interaction_id: Optional[str] = None
+
+
+@dataclass
 class GeneratedMapCodeResult:
     code: str
     assistant_response: str
@@ -112,6 +130,54 @@ Important:
 - If no dataset switch is requested, selected_dataset must stay the same.
 - Use the current style hint as context and modify it based on the new request.
 - No markdown. No prose outside JSON.
+"""
+
+
+_MULTILAYER_SYSTEM = """\
+You are a geospatial visualization planner that composes CROSS-DATASET overlays.
+
+You are given a user's request and a ranked list of candidate datasets (each with
+a relevance score and a summary of its attributes). Real analytical questions are
+often answered by MORE THAN ONE dataset shown together on the same map (for
+example, wildfire hotspots over population density, or vegetation types beside the
+parks that contain them).
+
+Your job: decide which of the candidates are JOINTLY relevant to the request and
+return one styled layer per chosen dataset.
+
+Return ONLY a single JSON object with exactly these top-level keys:
+- assistant_response: string (1-3 sentences; explain which datasets you combined and WHY)
+- layers: array of layer objects (length 1 to 3, ordered bottom layer first, top layer last)
+
+Each layer object must have exactly these keys:
+- dataset: string (must be one of the candidate dataset names, verbatim)
+- reason: string (why this dataset is relevant to the request)
+- selected_attributes: array of strings
+- style_intent: string
+- style: object with keys:
+  - target_attribute: string
+  - style_type: string
+  - color_theme: object with keys "name" and "colors"
+  - opacity: number
+  - stroke_width: number
+  - radius: number
+  - legend_title: string
+  - notes: array of strings
+
+Guidelines:
+- Include a dataset ONLY if it genuinely helps answer the request. If just one
+  dataset is relevant, return a single layer. Never pad with irrelevant datasets.
+- Prefer at most 3 layers. Put broad context (areas/polygons) on the bottom and
+  fine detail (points/lines) on top.
+- Lower the opacity of bottom polygon layers so upper layers stay visible.
+- For gradient/magnitude requests prefer a numeric attribute; for
+  classes/types/categories prefer a categorical attribute.
+- style_type should be one of: fill-gradient, fill-categorical, fill-single-color,
+  line-gradient, line-categorical, line-single-color, circle-gradient,
+  circle-categorical, circle-single-color.
+- Use 3 to 6 colors when helpful. Use distinct color themes per layer so overlaid
+  datasets are visually separable.
+No markdown. No prose outside JSON.
 """
 
 
@@ -300,6 +366,67 @@ def start_style_conversation(
         selected_attributes=[str(x) for x in (parsed.get("selected_attributes") or []) if x is not None],
         style_intent=_clean_text(parsed.get("style_intent")),
         style=_coerce_style_object(parsed.get("style")),
+        interaction_id=raw.interaction_id,
+    )
+
+
+def start_multilayer_conversation(
+    *,
+    candidates_summary: List[Dict[str, Any]],
+    user_query: str,
+    max_layers: int = 3,
+    provider_name: str = "gemini",
+    temperature: float = 0.2,
+) -> MultiLayerStyleResult:
+    """Ask the LLM to compose a cross-dataset overlay from ranked candidates.
+
+    ``candidates_summary`` is a list of {dataset, score, summary} dicts. The model
+    selects the jointly-relevant subset and returns one styled layer per dataset.
+    """
+    provider = LLMFactory.get_provider(provider_name)
+
+    prompt = (
+        f"Candidate datasets (ranked, best first):\n"
+        f"{json.dumps(candidates_summary, ensure_ascii=False, indent=2)}\n\n"
+        f"Maximum layers: {max_layers}\n\n"
+        f"User request:\n{user_query}\n\n"
+        "Select the jointly-relevant datasets and return the overlay JSON."
+    )
+
+    raw = provider.generate_response(
+        prompt,
+        system_instruction=_MULTILAYER_SYSTEM,
+        temperature=temperature,
+    )
+    logger.debug("start_multilayer_conversation raw text: %s", raw.text)
+
+    parsed = _extract_json_object(raw.text)
+    valid_names = {str(c.get("dataset")) for c in candidates_summary}
+
+    layers: List[LayerStyleSpec] = []
+    for item in (parsed.get("layers") or []):
+        if not isinstance(item, dict):
+            continue
+        dataset = _clean_text(item.get("dataset"))
+        if dataset not in valid_names:
+            # The model must pick from the provided candidates; drop hallucinations.
+            logger.warning("Multilayer: dropping non-candidate dataset %r", dataset)
+            continue
+        layers.append(
+            LayerStyleSpec(
+                dataset=dataset,
+                reason=_clean_text(item.get("reason")),
+                selected_attributes=[str(x) for x in (item.get("selected_attributes") or []) if x is not None],
+                style_intent=_clean_text(item.get("style_intent")),
+                style=_coerce_style_object(item.get("style")),
+            )
+        )
+        if len(layers) >= max_layers:
+            break
+
+    return MultiLayerStyleResult(
+        assistant_response=_clean_text(parsed.get("assistant_response")),
+        layers=layers,
         interaction_id=raw.interaction_id,
     )
 

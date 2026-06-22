@@ -28,7 +28,7 @@ catalyst serve --dir datasets --port 8765                                     # 
 catalyst info  --dir datasets/mydata                                          # inspect a dataset
 ```
 
-The README documents every CLI flag in a table — consult it before adding/changing flags. There is **no Makefile** despite README references to `make`.
+The README's CLI flag tables are accurate and worth consulting before adding/changing flags. The rest of the README is partly stale, though — it's still titled "Starlet", references `make` targets that don't exist (there is **no Makefile**), and its "API Endpoints" / "LLM Styling Suggestions" sections describe an older `POST /datasets/<dataset>/styles.json` endpoint that has been superseded by the `/api/chat-style` chat flow documented below. Trust this file over the README for the server/LLM surface.
 
 ### Running the demo
 
@@ -80,6 +80,8 @@ Key route groups in `app.py`:
 - **LLM demo**: `POST /api/chat-style` (main chat loop), `POST /api/query-styles`, `POST /api/generate-map-code`, `POST /api/upload-dataset` (+ `GET /api/upload-dataset/<job_id>` for async build-job polling).
 - **UI**: `GET /` (demo `index.html`), `GET /map.html`, `GET /datasets/<dataset>.html` (per-dataset visualization).
 
+> **Gotcha — the `map.html` template is not in the repo.** `index.html` embeds the map as `<iframe src="/map.html">`, and the `/map.html` route does `render_template("map.html")`, but `templates/` ships only `index.html` (and `view_mvt.html` lives in `server/`, outside the Flask `template_folder` and not in `package-data`). So `/map.html` currently raises `TemplateNotFound` and the iframe stays blank until you add a `map.html` template under `server/templates/` and register it in `pyproject.toml`. `POST /api/generate-map-code` only returns the JS *body* meant to run inside that page — it does not create the page.
+
 ### LLM styling & chat flow (`_internal/server/llm/`)
 
 This is the heart of the Catalyst demo. The conversation orchestration lives in `llm/suggestions.py`; the HTTP glue (request parsing, turn routing, response shaping) lives in `app.py`'s `chat_style()` route and its `_run_initial_chat_turn` / `_run_followup_chat_turn` closures.
@@ -97,7 +99,7 @@ Required env vars: `GEMINI_API_KEY` (Gemini), optional `OLLAMA_MODEL` (Ollama, d
 
 ### Catalog / semantic search (`_internal/server/catalog/`)
 
-`CatalogRouter` (`router.py`) provides semantic dataset search over embeddings of dataset descriptors, with two backends (`SearchBackend`): `.npy` cosine-similarity (default) or `pgvector` (`pgvector_store.py`, configured via request/env). `index.py` (`build_catalog_index`, `CATALOG_FILENAME`) builds the embedding index from dataset descriptors; `embedder.py`'s `GeminiTextEmbedder` produces the embeddings. The catalog index must exist (`datasets/_catalog/`) before chat routing works — `app.py` raises a clear "Catalogue index not found" error otherwise. (See the gotcha above: these source files are currently absent from disk.)
+`CatalogRouter` (`router.py`) provides semantic dataset search over embeddings of dataset descriptors, with two backends (`SearchBackend`): `.npy` cosine-similarity (default) or `pgvector` (`pgvector_store.py`, configured via request/env). `index.py` (`build_catalog_index`, `CATALOG_FILENAME`) builds the embedding index from dataset descriptors; `embedder.py`'s `GeminiTextEmbedder` produces the embeddings. The catalog index must exist (`datasets/_catalog/`) before chat routing works — `app.py` raises a clear "Catalogue index not found" error otherwise. The checked-in `datasets/_catalog/` index covers only the sample dataset(s); after you add datasets under `datasets/`, rebuild it (`build_catalog_index`) or semantic routing won't find them.
 
 ## Conventions
 

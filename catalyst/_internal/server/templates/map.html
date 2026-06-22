@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Catalyst Map Runtime</title>
+  <link href="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    #map { position: absolute; inset: 0; }
+    #legend {
+      position: absolute; left: 12px; bottom: 12px; z-index: 5;
+      background: rgba(17, 24, 39, 0.86); color: #f9fafb;
+      font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      border-radius: 8px; padding: 8px 10px; max-width: 280px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35); display: none;
+    }
+    #legend h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: .8; }
+    #legend .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+    #legend .sw { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 auto; border: 1px solid rgba(255,255,255,.25); }
+    #legend .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #legend .sub { opacity: .65; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="legend"></div>
+<script>
+"use strict";
+/*
+ * Catalyst map runtime (loaded inside a sandboxed <iframe sandbox="allow-scripts">).
+ *
+ * Two responsibilities:
+ *   1. Render one OR MORE catalyst datasets as stacked, independently-styled
+ *      MapLibre layers (the cross-dataset overlay that distinguishes Catalyst).
+ *   2. Provide a small, allow-listed `api` surface to LLM-generated scripts and
+ *      execute them in a constrained wrapper (no DOM / network / storage access).
+ *
+ * Because the hosting iframe is sandboxed WITHOUT allow-same-origin, this
+ * document has an opaque ("null") origin. We therefore (a) target postMessage
+ * with "*" and (b) authenticate the peer by window identity (event.source ===
+ * window.parent) rather than by origin string.
+ */
+
+// ----------------------------------------------------------------------------
+// Peer messaging (parent <-> runtime)
+// ----------------------------------------------------------------------------
+function postToParent(type, payload) {
+  try { window.parent.postMessage({ type, payload: payload || {} }, "*"); } catch (e) {}
+}
+function logToParent(message) { postToParent("starlet:runtime-log", { message: String(message) }); }
+function errorToParent(message) { postToParent("starlet:runtime-error", { message: String(message) }); }
+
+// ----------------------------------------------------------------------------
+// Map setup (basemap only; dataset layers are added on demand)
+// ----------------------------------------------------------------------------
+const map = new maplibregl.Map({
+  container: "map",
+  style: {
+    version: 8,
+    sources: {
+      basemap: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256, attribution: "© OpenStreetMap" }
+    },
+    layers: [{ id: "basemap", type: "raster", source: "basemap" }]
+  },
+  center: [0, 20],
+  zoom: 1.4
+});
+map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+// dataset -> { style, opacity, label, bbox, geometryKind }
+const layers = new Map();
+let activeDataset = "";
+let mapLoaded = false;
+
+// ----------------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------------
+function sourceId(dataset) { return "src__" + dataset.replace(/[^a-zA-Z0-9_]/g, "_"); }
+function layerId(dataset, kind) { return "lyr__" + dataset.replace(/[^a-zA-Z0-9_]/g, "_") + "__" + kind; }
+function tileUrl(dataset) {
+  // On-the-fly tiling route: /<dataset>/{z}/{x}/{y}.mvt
+  return window.location.origin + "/" + encodeURIComponent(dataset) + "/{z}/{x}/{y}.mvt";
+}
+
+function colorExpression(renderer) {
+  if (!renderer) return "#4682B4";
+  if (renderer.mode === "single") return renderer.color || "#4682B4";
+
+  if (renderer.mode === "categorical") {
+    const attr = renderer.attribute;
+    const fallback = renderer.fallback_color || "#4682B4";
+    const stops = Array.isArray(renderer.stops) ? renderer.stops : [];
+    if (!attr || stops.length === 0) return fallback;
+    const expr = ["match", ["to-string", ["get", attr]]];
+    for (const s of stops) {
+      if (s && s.value != null && s.color) { expr.push(String(s.value), s.color); }
+    }
+    if (expr.length < 4) return fallback; // MapLibre "match" needs >=1 label/output pair
+    expr.push(fallback);
+    return expr;
+  }
+
+  if (renderer.mode === "gradient") {
+    const attr = renderer.attribute;
+    const colors = (Array.isArray(renderer.colors) && renderer.colors.length) ? renderer.colors : ["#f7fbff", "#08306b"];
+    let min = Number(renderer.min), max = Number(renderer.max);
+    if (!isFinite(min)) min = 0;
+    if (!isFinite(max) || max <= min) max = min + 1;
+    if (!attr) return colors[colors.length - 1];
+    const expr = ["interpolate", ["linear"], ["to-number", ["get", attr], min]];
+    const n = colors.length;
+    for (let i = 0; i < n; i++) {
+      const t = min + (max - min) * (n === 1 ? 0 : i / (n - 1));
+      expr.push(t, colors[i]);
+    }
+    return expr;
+  }
+  return "#4682B4";
+}
+
+function defaultStyleFor(kind) {
+  const base = kind === "line" ? "line-single-color" : kind === "point" ? "circle-single-color" : "fill-single-color";
+  return {
+    style_type: base, geometry_kind: kind || "unknown",
+    opacity: 0.85, stroke_width: 1.5, radius: 4,
+    renderer: { mode: "single", color: "#4f83ff" },
+    legend_title: ""
+  };
+}
+
+function paintFor(style) {
+  const renderer = style.renderer || {};
+  const color = colorExpression(renderer);
+  const opacity = Number.isFinite(+style.opacity) ? +style.opacity : 0.85;
+  const strokeWidth = Number.isFinite(+style.stroke_width) ? +style.stroke_width : 1.5;
+  const radius = Number.isFinite(+style.radius) ? +style.radius : 4;
+  return {
+    fill: { "fill-color": color, "fill-opacity": Math.min(opacity, 0.85), "fill-outline-color": "rgba(0,0,0,0.25)" },
+    line: { "line-color": color, "line-width": strokeWidth, "line-opacity": Math.min(opacity + 0.1, 1) },
+    circle: { "circle-color": color, "circle-radius": radius, "circle-opacity": opacity, "circle-stroke-color": "#ffffff", "circle-stroke-width": 0.6 }
+  };
+}
+
+function ensureLayer(dataset, style) {
+  if (!dataset) return;
+  const sid = sourceId(dataset);
+  if (!map.getSource(sid)) {
+    map.addSource(sid, { type: "vector", tiles: [tileUrl(dataset)], minzoom: 0, maxzoom: 14 });
+  }
+  const paint = paintFor(style || defaultStyleFor("unknown"));
+  const specs = [
+    { kind: "fill", type: "fill", filter: ["==", "$type", "Polygon"], paint: paint.fill },
+    { kind: "line", type: "line", filter: ["in", "$type", "LineString", "Polygon"], paint: paint.line },
+    { kind: "circle", type: "circle", filter: ["==", "$type", "Point"], paint: paint.circle }
+  ];
+  for (const s of specs) {
+    const lid = layerId(dataset, s.kind);
+    if (!map.getLayer(lid)) {
+      map.addLayer({ id: lid, type: s.type, source: sid, "source-layer": "layer0", filter: s.filter, paint: s.paint });
+    } else {
+      for (const [k, v] of Object.entries(s.paint)) { map.setPaintProperty(lid, k, v); }
+    }
+  }
+}
+
+function applyStyleToDataset(dataset, style) {
+  if (!dataset) return;
+  ensureLayer(dataset, style);
+  const entry = layers.get(dataset) || {};
+  entry.style = style;
+  entry.label = (style && (style.legend_title || style.target_attribute)) || dataset;
+  layers.set(dataset, entry);
+  renderLegend();
+}
+
+function removeDataset(dataset) {
+  for (const kind of ["fill", "line", "circle"]) {
+    const lid = layerId(dataset, kind);
+    if (map.getLayer(lid)) map.removeLayer(lid);
+  }
+  const sid = sourceId(dataset);
+  if (map.getSource(sid)) { try { map.removeSource(sid); } catch (e) {} }
+  layers.delete(dataset);
+}
+
+function removeAll() {
+  for (const dataset of Array.from(layers.keys())) removeDataset(dataset);
+  activeDataset = "";
+  renderLegend();
+}
+
+const _bboxCache = new Map();
+async function datasetBBox(dataset) {
+  if (_bboxCache.has(dataset)) return _bboxCache.get(dataset);
+  try {
+    const resp = await fetch(window.location.origin + "/datasets/" + encodeURIComponent(dataset) + ".json");
+    const meta = await resp.json();
+    const bbox = Array.isArray(meta.bbox) && meta.bbox.length === 4 ? meta.bbox : null;
+    _bboxCache.set(dataset, bbox);
+    return bbox;
+  } catch (e) { return null; }
+}
+
+async function fitToDatasets(datasets) {
+  const boxes = [];
+  for (const d of datasets) { const b = await datasetBBox(d); if (b) boxes.push(b); }
+  if (!boxes.length) return;
+  let [minx, miny, maxx, maxy] = boxes[0];
+  for (const b of boxes) { minx = Math.min(minx, b[0]); miny = Math.min(miny, b[1]); maxx = Math.max(maxx, b[2]); maxy = Math.max(maxy, b[3]); }
+  if ([minx, miny, maxx, maxy].some(v => !isFinite(v))) return;
+  try { map.fitBounds([[minx, miny], [maxx, maxy]], { padding: 40, duration: 600, maxZoom: 12 }); } catch (e) {}
+}
+
+function renderLegend() {
+  const el = document.getElementById("legend");
+  if (!layers.size) { el.style.display = "none"; el.innerHTML = ""; return; }
+  const rows = Array.from(layers.entries()).map(([dataset, entry]) => {
+    const renderer = (entry.style && entry.style.renderer) || {};
+    let swatch = "#4f83ff";
+    if (renderer.mode === "single") swatch = renderer.color || swatch;
+    else if (renderer.mode === "categorical") swatch = (renderer.stops && renderer.stops[0] && renderer.stops[0].color) || renderer.fallback_color || swatch;
+    else if (renderer.mode === "gradient") swatch = (renderer.colors && renderer.colors[renderer.colors.length - 1]) || swatch;
+    const sub = (entry.style && entry.style.target_attribute) ? (" · " + entry.style.target_attribute) : "";
+    return `<div class="row"><span class="sw" style="background:${swatch}"></span><span class="nm">${dataset}<span class="sub">${sub}</span></span></div>`;
+  }).join("");
+  const title = layers.size > 1 ? `Overlay · ${layers.size} datasets` : "Layer";
+  el.innerHTML = `<h4>${title}</h4>${rows}`;
+  el.style.display = "block";
+}
+
+// Replace the whole stack with `specs` = [{dataset, style, opacity?, label?}]
+async function setLayers(specs) {
+  const wanted = new Set();
+  for (const spec of (specs || [])) {
+    if (!spec || !spec.dataset) continue;
+    wanted.add(spec.dataset);
+    const style = spec.style || defaultStyleFor("unknown");
+    if (spec.opacity != null) style.opacity = spec.opacity;
+    applyStyleToDataset(spec.dataset, style);
+  }
+  for (const existing of Array.from(layers.keys())) {
+    if (!wanted.has(existing)) removeDataset(existing);
+  }
+  const list = Array.from(wanted);
+  activeDataset = list.length ? list[list.length - 1] : "";
+  renderLegend();
+  if (list.length) await fitToDatasets(list);
+}
+
+// ----------------------------------------------------------------------------
+// API surface exposed to LLM-generated scripts
+// ----------------------------------------------------------------------------
+const api = {
+  setDataset(dataset) { if (!dataset) return; activeDataset = dataset; setLayers([{ dataset, style: layers.get(dataset) ? layers.get(dataset).style : undefined }]); },
+  applyStyle(style) { const ds = (style && style.dataset) || activeDataset; applyStyleToDataset(ds, style); },
+  setLayers(specs) { return setLayers(specs); },
+  addLayer(dataset, style) { applyStyleToDataset(dataset, style || defaultStyleFor("unknown")); if (dataset) { activeDataset = dataset; renderLegend(); } },
+  ensureDatasetLayer() { if (activeDataset) ensureLayer(activeDataset, layers.get(activeDataset) ? layers.get(activeDataset).style : undefined); },
+  fitToDataset(dataset) { return fitToDatasets([dataset || activeDataset].filter(Boolean)); },
+  fitToLayers() { return fitToDatasets(Array.from(layers.keys())); },
+  addLabels(options) { logToParent("addLabels is a no-op in this runtime build: " + JSON.stringify(options || {})); },
+  reset() { removeAll(); },
+  log(msg) { logToParent(msg); },
+  getState() { return { datasets: Array.from(layers.keys()), active: activeDataset }; }
+};
+
+// ----------------------------------------------------------------------------
+// Constrained execution of LLM-generated code
+// ----------------------------------------------------------------------------
+// Identifiers that would let a script escape the runtime sandbox or reach the
+// network / DOM / storage. Rejected before execution (defense-in-depth on top
+// of the iframe sandbox attribute and the limited argument surface).
+const FORBIDDEN = /\b(document|window|parent|top|self|globalThis|frames|opener|fetch|XMLHttpRequest|WebSocket|EventSource|importScripts|localStorage|sessionStorage|indexedDB|cookie|navigator|location|eval|Function|setTimeout|setInterval|require|module|process|__proto__|constructor)\b/;
+
+function runScript(script) {
+  const src = String(script || "");
+  if (!src.trim()) { errorToParent("No script to run."); return; }
+  const bad = src.match(FORBIDDEN);
+  if (bad) {
+    errorToParent("Blocked generated code: disallowed token \"" + bad[0] + "\". " +
+      "Only the provided api/map/maplibregl surface may be used.");
+    return;
+  }
+  try {
+    // Only api, map, maplibregl are in scope. Strict mode prevents implicit globals.
+    const fn = new Function("api", "map", "maplibregl", '"use strict";\n' + src);
+    fn(api, map, maplibregl);
+    logToParent("Generated script executed.");
+  } catch (e) {
+    errorToParent("Generated script error: " + (e && e.message ? e.message : e));
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Parent -> runtime message handling
+// ----------------------------------------------------------------------------
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent) return;     // authenticate peer by identity
+  const data = event.data || {};
+  const type = data.type;
+  const payload = data.payload || {};
+
+  switch (type) {
+    case "starlet:ping":
+      postToParent("starlet:pong", {});
+      break;
+    case "starlet:reset":
+      removeAll();
+      break;
+    case "starlet:set-dataset":
+      if (payload.dataset) { activeDataset = payload.dataset; setLayers([{ dataset: payload.dataset, style: layers.get(payload.dataset) ? layers.get(payload.dataset).style : undefined }]); }
+      break;
+    case "starlet:apply-style":
+      applyStyleToDataset(payload.dataset || activeDataset, payload.style);
+      break;
+    case "starlet:set-layers":
+      setLayers(payload.layers || []);
+      break;
+    case "starlet:run-script":
+      if (payload.dataset) activeDataset = payload.dataset;
+      runScript(payload.script);
+      break;
+    default:
+      break;
+  }
+});
+
+map.on("load", () => {
+  mapLoaded = true;
+  postToParent("starlet:runtime-ready", {});
+});
+</script>
+</body>
+</html>
