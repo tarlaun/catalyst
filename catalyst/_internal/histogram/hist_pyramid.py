@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
+from .._parallel import pool_context
+
 import numpy as np
 import pyarrow.parquet as pq
 from shapely import from_wkb
@@ -165,20 +167,13 @@ def _process_one_tile(parquet_path: Path, cfg, geom_col: str) -> np.ndarray:
 # GLOBAL SUM AND PREFIX SUM
 # ---------------------------------------------------------------------------
 
-def _sum_all_tiles(tile_hists: List[np.ndarray], outdir: Path, dtype="float64") -> Path:
-
-    if not tile_hists:
+def _sum_all_tiles(total: np.ndarray, outdir: Path, dtype="float64") -> Path:
+    # `total` is the already-summed global histogram (summed incrementally as
+    # tiles complete, so we never hold all per-tile grids at once).
+    if total is None:
         raise RuntimeError("No tile histograms generated")
 
-    example = tile_hists[0]
-    total = np.zeros_like(example, dtype=dtype)
-
-    for hist in tile_hists:
-        if hist.shape != total.shape:
-            raise ValueError(
-                f"Tile histogram has shape {hist.shape}, expected {total.shape}"
-            )
-        total += hist
+    total = np.asarray(total, dtype=dtype)
 
     global_path = outdir / "global.npy"
     np.save(global_path, total, allow_pickle=False)
@@ -247,15 +242,23 @@ def build_histograms_for_dir(
     outdir_p = Path(outdir)
     outdir_p.mkdir(parents=True, exist_ok=True)
 
-    tile_outputs = []
-
-    with ProcessPoolExecutor(max_workers=cfg.max_parallel_tiles) as ex:
+    # Sum each tile's histogram into a single running total as soon as the
+    # worker returns it, instead of collecting all N grids first. Peak memory is
+    # then ~one grid (+ in-flight workers) regardless of tile count; the old
+    # list held N x grid_size^2 float64 arrays (134 MB each).
+    total = None
+    with ProcessPoolExecutor(max_workers=cfg.max_parallel_tiles, mp_context=pool_context()) as ex:
         futures = {
             ex.submit(_process_one_tile, p, cfg, geom_col): p
             for p in tiles
         }
 
         for f in as_completed(futures):
-            tile_outputs.append(f.result())
+            h = f.result()
+            if total is None:
+                total = np.array(h, dtype=np.dtype(dtype))
+            else:
+                total += h
+            del h
 
-    _sum_all_tiles(tile_outputs, outdir_p, dtype=dtype)
+    _sum_all_tiles(total, outdir_p, dtype=dtype)

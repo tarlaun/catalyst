@@ -25,6 +25,9 @@ class SpaceSavingTopK:
 
     def result(self):
         total_count = sum(self.counter.values())
+        if total_count == 0:
+            return []
+
         top_k = self.counter.most_common(self.k)
         top_k_count = sum(count for _, count in top_k)
 
@@ -147,9 +150,21 @@ class TextSketch(CategoricalSketch):
 
 
 class GeometrySketch:
-    def __init__(self):
-        self.minx = self.miny = None
-        self.maxx = self.maxy = None
+    def __init__(self, global_mbr=None):
+        """
+        Initialize GeometrySketch with optional pre-computed global MBR.
+
+        Args:
+            global_mbr: Optional tuple of (minx, miny, maxx, maxy) to skip redundant MBR computation
+        """
+        if global_mbr is not None:
+            self.minx, self.miny, self.maxx, self.maxy = global_mbr
+            self._skip_mbr_computation = True
+        else:
+            self.minx = self.miny = None
+            self.maxx = self.maxy = None
+            self._skip_mbr_computation = False
+
         self.geom_types = Counter()
         self.total_points = 0
 
@@ -169,19 +184,35 @@ class GeometrySketch:
 
             self.geom_types[geom.geom_type] += 1
 
-            minx, miny, maxx, maxy = geom.bounds
-            if self.minx is None:
-                self.minx, self.miny, self.maxx, self.maxy = minx, miny, maxx, maxy
-            else:
-                self.minx = min(self.minx, minx)
-                self.miny = min(self.miny, miny)
-                self.maxx = max(self.maxx, maxx)
-                self.maxy = max(self.maxy, maxy)
+            # Only compute MBR if not pre-provided
+            if not self._skip_mbr_computation:
+                minx, miny, maxx, maxy = geom.bounds
+                if self.minx is None:
+                    self.minx, self.miny, self.maxx, self.maxy = minx, miny, maxx, maxy
+                else:
+                    self.minx = min(self.minx, minx)
+                    self.miny = min(self.miny, miny)
+                    self.maxx = max(self.maxx, maxx)
+                    self.maxy = max(self.maxy, maxy)
 
-            try:
-                self.total_points += len(geom.coords)
-            except Exception:
-                pass
+            self.total_points += self._count_coords(geom)
+
+    @staticmethod
+    def _count_coords(geom) -> int:
+        """Recursively count vertices in any geometry type."""
+        geom_type = geom.geom_type
+        if geom_type == 'Point':
+            return 1
+        elif geom_type in ('LineString', 'LinearRing'):
+            return len(geom.coords)
+        elif geom_type == 'Polygon':
+            count = len(geom.exterior.coords)
+            for ring in geom.interiors:
+                count += len(ring.coords)
+            return count
+        elif geom_type.startswith('Multi') or geom_type == 'GeometryCollection':
+            return sum(GeometrySketch._count_coords(part) for part in geom.geoms)
+        return 0
 
 
     def finalize(self):

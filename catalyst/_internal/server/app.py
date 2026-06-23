@@ -190,7 +190,7 @@ def create_app(
             outdir.parent.mkdir(parents=True, exist_ok=True)
 
             build_t0 = perf_counter()
-            tile_result, mvt_result = starlet_build(
+            tile_result, mvt_result, _pmtiles_path = starlet_build(
                 input=str(uploaded_file_path),
                 outdir=str(outdir),
                 num_tiles=num_tiles,

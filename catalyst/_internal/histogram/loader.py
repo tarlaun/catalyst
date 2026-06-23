@@ -15,7 +15,10 @@ class HistogramLoader:
         logger.info("Loading histogram from %s", self.hist_path)
         arr = np.load(self.hist_path, allow_pickle=False)
 
-        # If the provided file is already a prefix histogram, use it directly.
+        # If the provided file is already a prefix histogram (the integral image
+        # ``global_prefix.npy`` written by the tiling stage), use it directly;
+        # ``global.npy`` is the raw histogram and still needs the cumulative
+        # sums computed here.
         if self.hist_path.stem.endswith("_prefix"):
             self.prefix = arr
         else:

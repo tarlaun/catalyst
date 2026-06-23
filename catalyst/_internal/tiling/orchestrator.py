@@ -66,6 +66,7 @@ class RoundOrchestrator:
         sfc_bits: int = 16,
         global_extent=None,
         pq_args: Optional[dict] = None,
+        covering_bbox: bool = False,
     ) -> None:
         self.source = source
         self.assigner = assigner
@@ -79,6 +80,7 @@ class RoundOrchestrator:
         self.sfc_bits = int(sfc_bits)
         self.global_extent = global_extent
         self._pq_args = dict(pq_args or {})
+        self.covering_bbox = bool(covering_bbox)
         self._stats_collector: Optional[AttributeStatsCollector] = None
 
     def _overflow_path_for_round(self, round_id: int) -> Path:
@@ -143,6 +145,7 @@ class RoundOrchestrator:
             global_extent=self.global_extent,
             compression=self.compression,
             max_parallel_files=self.max_parallel_files,
+            covering_bbox=self.covering_bbox,
             **self._pq_args,
         )
 

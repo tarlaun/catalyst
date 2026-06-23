@@ -78,7 +78,7 @@ class VectorTiler:
 
         for pf in intersecting:
             try:
-                gdf = self.index.load_and_reproject(pf)
+                gdf = self.index.load_and_reproject(pf, bounds.bbox_4326)
             except Exception as e:
                 logger.error("[TileGen] z=%d x=%d y=%d load failed %s: %s", z, x, y, pf, e)
                 continue
@@ -156,15 +156,15 @@ class VectorTiler:
             self.cache.put(key, data)
             return data
 
-        logger.info("[Cache] MISS z=%d x=%d y=%d — generating", z, x, y)
+        logger.info("[Cache] MISS z=%d x=%d y=%d — generating (memory cache only)", z, x, y)
 
         tile_bytes = self.generate(z, x, y)
 
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(tile_bytes)
-        except Exception as e:
-            logger.error("[Cache] disk write failed z=%d x=%d y=%d: %s", z, x, y, e)
-
+        # On-demand tiles are cached in memory only; we deliberately do NOT
+        # persist them to disk. Writing every generated tile would incrementally
+        # materialise the full pyramid on disk over time — exactly what lazy
+        # serving exists to avoid. Callers who want a durable on-disk pyramid
+        # should pre-generate it explicitly (`catalyst mvt` / `generate_mvt`,
+        # e.g. with threshold=0 to materialise every non-empty tile).
         self.cache.put(key, tile_bytes)
         return tile_bytes

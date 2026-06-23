@@ -1,5 +1,6 @@
 import logging
 import multiprocessing
+import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -134,6 +135,11 @@ class TileRenderer:
         self.outdir.mkdir(parents=True, exist_ok=True)
 
         cpu_default = max(1, multiprocessing.cpu_count() - 1)
+        # Allow capping render parallelism via env to bound peak memory on
+        # constrained machines (each worker holds tile geometry in RAM).
+        env_workers = os.environ.get("CATALYST_MVT_WORKERS", "").strip()
+        if max_workers is None and env_workers.isdigit() and int(env_workers) > 0:
+            max_workers = int(env_workers)
         self.max_workers = max(1, int(max_workers or cpu_default))
 
     def render(self, buckets):

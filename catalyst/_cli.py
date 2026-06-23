@@ -53,10 +53,13 @@ def main():
 @click.option("--sfc-bits", type=int, default=16, show_default=True, help="Bits per axis for Z-order key.")
 @click.option("--max-parallel-files", type=int, default=64, show_default=True, help="Max concurrent tile writes.")
 @click.option("--index", default=None, help="Legacy CSV index file (overrides --num-tiles).")
+@click.option("--covering-bbox/--no-covering-bbox", default=False, show_default=True,
+              help="Opt-in: write per-row bbox covering columns + bounded row groups for "
+                   "fast on-demand serving. Off by default (faster batch tiling, smaller files).")
 @click.option("--log-level", default="INFO", show_default=True, help="Logging level.")
 def tile(input_path, outdir, num_tiles, partition_size, sort, compression,
          sample_cap, sample_ratio, seed, geom_col, sfc_bits, max_parallel_files,
-         index, log_level):
+         index, covering_bbox, log_level):
     """Partition a geospatial dataset into spatially-tiled Parquet files."""
     _setup_logging(log_level)
     import catalyst
@@ -75,6 +78,7 @@ def tile(input_path, outdir, num_tiles, partition_size, sort, compression,
         sfc_bits=sfc_bits,
         max_parallel_files=max_parallel_files,
         index=index,
+        covering_bbox=covering_bbox,
     )
     click.echo(f"Tiling complete: {result.num_files} tiles, {result.total_rows} rows")
     click.echo(f"  Output: {result.outdir}")
@@ -109,22 +113,28 @@ def mvt(tile_dir, zoom, threshold, outdir, log_level):
 @click.option("--zoom", type=int, default=7, show_default=True, help="Maximum zoom level.")
 @click.option("--num-tiles", type=int, default=40, show_default=True, help="Target number of spatial partitions.")
 @click.option("--threshold", type=float, default=100000, show_default=True, help="Minimum feature count per MVT tile.")
+@click.option("--pmtiles", is_flag=True, help="Export MVT tiles to PMTiles archive after generation.")
+@click.option("--pmtiles-compression", default="gzip", show_default=True, type=click.Choice(["gzip", "brotli", "zstd", "none"]), help="PMTiles compression format.")
 @click.option("--log-level", default="INFO", show_default=True, help="Logging level.")
-def build(input_path, outdir, zoom, num_tiles, threshold, log_level):
+def build(input_path, outdir, zoom, num_tiles, threshold, pmtiles, pmtiles_compression, log_level):
     """Run the full pipeline: tile then generate MVTs."""
     _setup_logging(log_level)
     import catalyst
 
-    tile_result, mvt_result = catalyst.build(
+    tile_result, mvt_result, pmtiles_path = catalyst.build(
         input=input_path,
         outdir=outdir,
         zoom=zoom,
         num_tiles=num_tiles,
         threshold=threshold,
+        pmtiles=pmtiles,
+        pmtiles_compression=pmtiles_compression,
     )
     click.echo(f"Build complete:")
     click.echo(f"  Tiles: {tile_result.num_files} files, {tile_result.total_rows} rows")
     click.echo(f"  MVTs: {mvt_result.tile_count} tiles across zoom levels {mvt_result.zoom_levels}")
+    if pmtiles_path:
+        click.echo(f"  PMTiles: {pmtiles_path}")
 
 
 @main.command()
