@@ -14,13 +14,18 @@
       background: rgba(17, 24, 39, 0.86); color: #f9fafb;
       font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       border-radius: 8px; padding: 8px 10px; max-width: 280px;
+      max-height: 46vh; overflow-y: auto;
       box-shadow: 0 4px 14px rgba(0,0,0,0.35); display: none;
     }
     #legend h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: .8; }
     #legend .row { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
     #legend .sw { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 auto; border: 1px solid rgba(255,255,255,.25); }
-    #legend .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #legend .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 230px; }
     #legend .sub { opacity: .65; font-size: 11px; }
+    #legend .sec { margin-top: 8px; }
+    #legend .sec:first-of-type { margin-top: 0; }
+    #legend .ds { font-weight: 600; margin: 0 0 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #legend .bar { height: 10px; border-radius: 3px; margin: 4px 0 2px; border: 1px solid rgba(255,255,255,.25); }
   </style>
 </head>
 <body>
@@ -213,20 +218,59 @@ async function fitToDatasets(datasets) {
   try { map.fitBounds([[minx, miny], [maxx, maxy]], { padding: 40, duration: 600, maxZoom: 12 }); } catch (e) {}
 }
 
+function escHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+function legendSwatch(color) {
+  return `<span class="sw" style="background:${escHtml(color || "#4f83ff")}"></span>`;
+}
+function fmtNum(v) {
+  if (typeof v !== "number" || !isFinite(v)) return v == null ? "" : v;
+  if (Number.isInteger(v)) return Math.abs(v) >= 1000 ? v.toLocaleString() : String(v);
+  return Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : v.toFixed(2);
+}
+
 function renderLegend() {
   const el = document.getElementById("legend");
   if (!layers.size) { el.style.display = "none"; el.innerHTML = ""; return; }
-  const rows = Array.from(layers.entries()).map(([dataset, entry]) => {
-    const renderer = (entry.style && entry.style.renderer) || {};
-    let swatch = "#4f83ff";
-    if (renderer.mode === "single") swatch = renderer.color || swatch;
-    else if (renderer.mode === "categorical") swatch = (renderer.stops && renderer.stops[0] && renderer.stops[0].color) || renderer.fallback_color || swatch;
-    else if (renderer.mode === "gradient") swatch = (renderer.colors && renderer.colors[renderer.colors.length - 1]) || swatch;
-    const sub = (entry.style && entry.style.target_attribute) ? (" · " + entry.style.target_attribute) : "";
-    return `<div class="row"><span class="sw" style="background:${swatch}"></span><span class="nm">${dataset}<span class="sub">${sub}</span></span></div>`;
+  const multi = layers.size > 1;
+  const MAX_CATS = 16;
+  const sections = Array.from(layers.entries()).map(([dataset, entry]) => {
+    const style = entry.style || {};
+    const renderer = style.renderer || {};
+    const attr = style.target_attribute || renderer.attribute || "";
+    const head = multi
+      ? `<div class="ds">${escHtml(dataset)}${attr ? `<span class="sub"> · ${escHtml(attr)}</span>` : ""}</div>`
+      : "";
+    let body = "";
+    if (renderer.mode === "categorical" && Array.isArray(renderer.stops) && renderer.stops.length) {
+      const shown = renderer.stops.slice(0, MAX_CATS);
+      body = shown.map(s =>
+        `<div class="row">${legendSwatch(s.color)}<span class="nm">${escHtml(s.value)}</span></div>`
+      ).join("");
+      if (renderer.stops.length > MAX_CATS) {
+        body += `<div class="row sub" style="padding-left:22px;">+${renderer.stops.length - MAX_CATS} more…</div>`;
+      }
+      if (renderer.fallback_color) {
+        body += `<div class="row">${legendSwatch(renderer.fallback_color)}<span class="nm sub">Other / no value</span></div>`;
+      }
+    } else if (renderer.mode === "gradient") {
+      const colors = (renderer.colors && renderer.colors.length) ? renderer.colors : ["#4f83ff", "#f9fafb"];
+      body =
+        `<div class="bar" style="background:linear-gradient(to right, ${colors.map(escHtml).join(", ")})"></div>` +
+        `<div class="row sub" style="justify-content:space-between;gap:0;">` +
+          `<span>${escHtml(fmtNum(renderer.min))}</span><span>${escHtml(fmtNum(renderer.max))}</span></div>`;
+    } else {
+      const color = renderer.color || (renderer.stops && renderer.stops[0] && renderer.stops[0].color) || "#4f83ff";
+      const label = multi ? (attr || "value") : dataset;
+      body = `<div class="row">${legendSwatch(color)}<span class="nm">${escHtml(label)}</span></div>`;
+    }
+    return `<div class="sec">${head}${body}</div>`;
   }).join("");
-  const title = layers.size > 1 ? `Overlay · ${layers.size} datasets` : "Layer";
-  el.innerHTML = `<h4>${title}</h4>${rows}`;
+  const first = layers.values().next().value;
+  const firstTitle = first && first.style && (first.style.legend_title || first.style.target_attribute);
+  const title = multi ? `Overlay · ${layers.size} datasets` : (escHtml(firstTitle) || "Layer");
+  el.innerHTML = `<h4>${title}</h4>${sections}`;
   el.style.display = "block";
 }
 

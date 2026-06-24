@@ -31,6 +31,10 @@ def _iter_dataset_dirs(data_root: Path):
             continue
         if path.name == CATALOG_DIRNAME:
             continue
+        # Skip derived (spatial-join result) datasets: they are query outputs,
+        # not source datasets, and shouldn't pollute semantic-search candidates.
+        if (path / "derived.json").exists():
+            continue
         yield path
 
 

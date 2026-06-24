@@ -34,10 +34,16 @@ class LayerStyleSpec:
 
 @dataclass
 class MultiLayerStyleResult:
-    """Result of selecting and styling 1..N jointly-relevant datasets."""
+    """Result of selecting and styling 1..N jointly-relevant datasets.
+
+    If the user asked to COMBINE datasets into a new derived attribute (a spatial
+    join + aggregate, e.g. "color parks by their dominant vegetation type"),
+    ``derive`` holds that spec instead of ``layers``.
+    """
     assistant_response: str
     layers: List[LayerStyleSpec]
     interaction_id: Optional[str] = None
+    derive: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -145,7 +151,24 @@ parks that contain them).
 Your job: decide which of the candidates are JOINTLY relevant to the request and
 return one styled layer per chosen dataset.
 
-Return ONLY a single JSON object with exactly these top-level keys:
+SPECIAL CASE — spatial join / derived attribute:
+If the user asks to color/size one dataset BY A PROPERTY DERIVED FROM ANOTHER
+dataset (a spatial join + aggregation) — e.g. "color parks by their most
+prominent vegetation type", "shade parks by the number of intersections inside
+them", "color zip codes by average building height" — then DO NOT return layers.
+Instead return a JSON object with:
+- assistant_response: string
+- derive: object with keys:
+  - target_dataset: string (the features to color; a candidate name)
+  - source_dataset: string (where the property comes from; a candidate name)
+  - predicate: "intersects" | "within"
+  - aggregate: "dominant" | "count" | "mean" | "sum"   (dominant = most prominent / area-weighted mode)
+  - value_attribute: string (the SOURCE attribute to aggregate; omit/empty for count)
+  - output_attribute: string (snake_case name for the new attribute, e.g. "dominant_vegetation")
+Choose value_attribute from the source dataset's attributes. Use this ONLY for
+genuine combine/join requests; for plain styling or simple overlays return layers.
+
+Otherwise (normal styling / overlay), return ONLY a single JSON object with:
 - assistant_response: string (1-3 sentences; explain which datasets you combined and WHY)
 - layers: array of layer objects (length 1 to 3, ordered bottom layer first, top layer last)
 
@@ -402,6 +425,28 @@ def start_multilayer_conversation(
 
     parsed = _extract_json_object(raw.text)
     valid_names = {str(c.get("dataset")) for c in candidates_summary}
+
+    # Spatial-join / derived-attribute path: only honour it if both datasets are
+    # real candidates (don't trust hallucinated names).
+    derive_raw = parsed.get("derive")
+    if isinstance(derive_raw, dict):
+        target = _clean_text(derive_raw.get("target_dataset"))
+        source = _clean_text(derive_raw.get("source_dataset"))
+        if target in valid_names and source in valid_names and target != source:
+            return MultiLayerStyleResult(
+                assistant_response=_clean_text(parsed.get("assistant_response")),
+                layers=[],
+                interaction_id=raw.interaction_id,
+                derive={
+                    "target_dataset": target,
+                    "source_dataset": source,
+                    "predicate": _clean_text(derive_raw.get("predicate")) or "intersects",
+                    "aggregate": _clean_text(derive_raw.get("aggregate")) or "dominant",
+                    "value_attribute": _clean_text(derive_raw.get("value_attribute")) or None,
+                    "output_attribute": _clean_text(derive_raw.get("output_attribute")) or None,
+                },
+            )
+        logger.warning("Multilayer: dropping derive spec with non-candidate datasets %r/%r", target, source)
 
     layers: List[LayerStyleSpec] = []
     for item in (parsed.get("layers") or []):

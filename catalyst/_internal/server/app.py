@@ -270,6 +270,116 @@ def create_app(
                 message=str(e),
             )
 
+    def _default_output_attr(aggregate: str, value_attribute: Optional[str]) -> str:
+        if aggregate == "count":
+            return "feature_count"
+        base = (value_attribute or "value").lower()
+        prefix = {"dominant": "dominant", "mean": "avg", "sum": "total"}.get(aggregate, aggregate)
+        return f"{prefix}_{base}"
+
+    def _run_derive(spec: Dict[str, Any]) -> Dict[str, Any]:
+        """Spatially aggregate one dataset onto another, materialize the result as
+        a new built dataset, and (re)index the catalogue. Returns metadata about
+        the derived dataset (name + the new attribute to style)."""
+        from .derive.spatial_aggregate import derive_dataset
+
+        target = _normalize_unicode_text(spec.get("target_dataset", "")).strip()
+        source = _normalize_unicode_text(spec.get("source_dataset", "")).strip()
+        aggregate = (_normalize_unicode_text(spec.get("aggregate", "dominant")).strip() or "dominant").lower()
+        predicate = (_normalize_unicode_text(spec.get("predicate", "intersects")).strip() or "intersects").lower()
+        weight = _normalize_unicode_text(spec.get("weight", "area")).strip() or "area"
+        value_attribute = _normalize_unicode_text(spec.get("value_attribute", "")).strip() or None
+        output_attribute = _normalize_unicode_text(spec.get("output_attribute", "")).strip() or \
+            _default_output_attr(aggregate, value_attribute)
+
+        if not target or not _dataset_exists(target):
+            raise LookupError(f"Target dataset not found: {target!r}")
+        if not source or not _dataset_exists(source):
+            raise LookupError(f"Source dataset not found: {source!r}")
+        if aggregate != "count" and not value_attribute:
+            raise ValueError(f"aggregate={aggregate!r} requires a value_attribute")
+
+        name = _slugify_dataset_name(f"{target}__{output_attribute}")
+        out_parquet = uploads_root / f"{name}.parquet"
+        uploads_root.mkdir(parents=True, exist_ok=True)
+
+        spec_key = {
+            "target_dataset": target, "source_dataset": source, "aggregate": aggregate,
+            "predicate": predicate, "weight": weight, "value_attribute": value_attribute,
+            "output_attribute": output_attribute,
+        }
+        marker_path = data_root / name / "derived.json"
+
+        # Idempotent cache: if this exact derivation was already materialized,
+        # reuse it instead of recomputing the join + rebuild.
+        if marker_path.exists():
+            try:
+                cached = json.loads(marker_path.read_text())
+                if cached.get("spec") == spec_key:
+                    return {**cached.get("info", {}), "dataset": name,
+                            "output_attribute": output_attribute, "cached": True,
+                            "derive_seconds": 0.0}
+            except Exception:
+                pass
+
+        derive_t0 = perf_counter()
+        derive_dataset(
+            data_root=str(data_root),
+            target_dataset=target,
+            source_dataset=source,
+            predicate=predicate,
+            aggregate=aggregate,
+            value_attribute=value_attribute,
+            weight=weight,
+            output_attribute=output_attribute,
+            out_path=str(out_parquet),
+        )
+        derive_seconds = perf_counter() - derive_t0
+
+        outdir = data_root / name
+        starlet_build(input=str(out_parquet), outdir=str(outdir), num_tiles=8, zoom=7, threshold=0)
+
+        info = {
+            "dataset": name,
+            "output_attribute": output_attribute,
+            "target_dataset": target,
+            "source_dataset": source,
+            "aggregate": aggregate,
+            "value_attribute": value_attribute,
+            "predicate": predicate,
+            "derive_seconds": round(derive_seconds, 2),
+        }
+        # Mark this as a derived dataset (excluded from search candidates) and
+        # record the spec for the idempotent cache.
+        try:
+            marker_path.write_text(json.dumps({"spec": spec_key, "info": info}, indent=2))
+        except Exception:
+            logger.exception("[Derive] could not write marker for %s", name)
+
+        tiler_cache.pop(name, None)
+        _catalog_runtime["router"] = None
+        _catalog_runtime["mtime"] = None
+        try:
+            build_catalog_index(data_root=data_root, out_dir=data_root / "_catalog", sync_pgvector=False)
+        except Exception:
+            logger.exception("[Derive] catalogue reindex failed for %s", name)
+        _catalog_runtime["router"] = None
+        _catalog_runtime["mtime"] = None
+
+        return info
+
+    def _run_derive_job(*, job_id: str, spec: Dict[str, Any]) -> None:
+        try:
+            _set_build_job(job_id, status="running", step="joining",
+                           message="Spatially joining datasets...")
+            info = _run_derive(spec)
+            _set_build_job(job_id, status="completed", step="done",
+                           message=f"Derived dataset '{info['dataset']}' is ready.",
+                           **info)
+        except Exception as e:
+            logger.exception("[DeriveJob] Failed for spec=%s", spec)
+            _set_build_job(job_id, status="failed", step="error", message=str(e))
+
     def get_tiler(dataset: str) -> VectorTiler:
         if dataset not in tiler_cache:
             tiler_cache[dataset] = VectorTiler(
@@ -1016,6 +1126,51 @@ def create_app(
                 max_layers=3,
                 provider_name="gemini",
             )
+            # Spatial-join / derived-attribute request: build a new dataset by
+            # combining two datasets, then style it by the derived attribute.
+            if getattr(multi, "derive", None):
+                llm_ms = (perf_counter() - llm_t0) * 1000.0
+                info = _run_derive(multi.derive)
+                derived = info["dataset"]
+                attr = info["output_attribute"]
+                d_summary = _dataset_summary_for_llm(derived)
+                d_geom = _infer_geometry_kind_from_summary(d_summary)
+                raw_style = {
+                    "target_attribute": attr,
+                    "style_type": f"{_GEOM_PREFIX.get(d_geom, 'fill')}-categorical",
+                    "color_theme": {"name": "category", "colors": _categorical_palette()},
+                    "opacity": 0.85, "stroke_width": 1.0, "radius": 4.0,
+                    "legend_title": attr.replace("_", " ").title(),
+                    "notes": [f"{info['aggregate']} of {info.get('value_attribute') or 'features'} from {info['source_dataset']}"],
+                }
+                d_style = _normalize_style_for_client(dataset=derived, dataset_summary=d_summary, style=raw_style)
+                d_layer = {
+                    "dataset": derived, "score": 1.0,
+                    "reason": f"Spatially joined {info['target_dataset']} x {info['source_dataset']} ({info['aggregate']}).",
+                    "geometry_kind": d_geom, "selected_attributes": [attr],
+                    "style_intent": f"{info['aggregate']} {attr}", "style": d_style,
+                }
+                render_ms = _warm_tile_render_ms([derived])
+                total_ms = (perf_counter() - total_t0) * 1000.0
+                fallback_msg = f"Joined {info['target_dataset']} with {info['source_dataset']} and colored by {attr.replace('_', ' ')}."
+                return {
+                    "mode": "initial", "query": normalized_query,
+                    "interaction_id": _normalize_unicode_text(multi.interaction_id),
+                    "assistant_response": _normalize_unicode_text(multi.assistant_response or fallback_msg),
+                    "selection_mode": "derive",
+                    "selected_dataset": derived, "selected_dataset_score": 1.0,
+                    "selected_attributes": [attr], "style_intent": f"{info['aggregate']} {attr}",
+                    "style": d_style, "layers": [d_layer], "derive": info,
+                    "top_k": candidate_payload,
+                    "timings": {
+                        "semantic_search_ms": round(semantic_search_ms, 3),
+                        "llm_ms": round(llm_ms, 3),
+                        "derive_ms": round(info.get("derive_seconds", 0.0) * 1000.0, 1),
+                        "mvt_render_ms": render_ms,
+                        "total_ms": round(total_ms, 3),
+                        "last_tile_request_ms": None,
+                    },
+                }, 200
             layers = _llm_overlay_layers(multi, candidate_by_name)
             if not layers:
                 raise ValueError("LLM returned no usable layers")
@@ -1593,6 +1748,34 @@ def create_app(
         if not job:
             return _json_response({"error": f"Job not found: {job_id}"}, 404)
         return _json_response(job, 200)
+
+    @app.post("/api/derive-dataset")
+    def derive_dataset_route():
+        """Cross-dataset spatial join -> derived dataset (async job).
+
+        Body: {target_dataset, source_dataset, aggregate, value_attribute?,
+               predicate?, weight?, output_attribute?}. Poll via
+        GET /api/upload-dataset/<job_id> (same job store)."""
+        try:
+            body = request.get_json(silent=True) or {}
+            spec = {k: body.get(k) for k in (
+                "target_dataset", "source_dataset", "aggregate", "value_attribute",
+                "predicate", "weight", "output_attribute",
+            )}
+            if not spec.get("target_dataset") or not spec.get("source_dataset"):
+                return _json_response({"error": "target_dataset and source_dataset are required"}, 400)
+
+            job_id = uuid4().hex
+            _set_build_job(job_id, status="queued", step="queued",
+                           message="Derive request received.", spec=spec,
+                           created_at=datetime.now(timezone.utc).isoformat())
+            Thread(target=_run_derive_job, kwargs={"job_id": job_id, "spec": spec}, daemon=True).start()
+            return _json_response(
+                {"ok": True, "job_id": job_id, "message": "Spatial join started."}, 202
+            )
+        except Exception as e:
+            logger.exception("[DeriveDataset] request failed")
+            return _json_response({"error": f"Derive request failed: {e}"}, 500)
 
     @app.post("/api/query-styles")
     def query_styles():
