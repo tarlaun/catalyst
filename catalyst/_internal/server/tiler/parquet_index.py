@@ -82,11 +82,17 @@ class ParquetIndex:
     def __init__(self, folder: Path, partition_cache_size: int = 4) -> None:
         self.folder = Path(folder)
         self._entries: List[Tuple[Path, BBox]] = []
+        # Tiles whose filename carries no bbox (e.g. legacy "<n>.parquet"): they
+        # can't be pruned by filename, so they are always considered and the
+        # read-time bbox pre-filter keeps the result exact.
+        self._unknown: List[Path] = []
         if self.folder.exists():
             for pf in sorted(self.folder.glob("*.parquet")):
                 bbox = parse_parquet_bbox(pf.name)
                 if bbox is not None:
                     self._entries.append((pf, bbox))
+                else:
+                    self._unknown.append(pf)
         self._partition_cache_size = partition_cache_size
         # key -> (native GeoDataFrame, cached per-geometry bounds DataFrame)
         self._partition_cache: "OrderedDict[str, Tuple[gpd.GeoDataFrame, object]]" = OrderedDict()
@@ -97,8 +103,15 @@ class ParquetIndex:
     parse_parquet_bbox = staticmethod(parse_parquet_bbox)
 
     def find_intersecting_files(self, bbox_4326: BBox) -> List[Path]:
-        """Partitions whose filename bbox overlaps ``bbox_4326`` (WGS84)."""
-        return [pf for pf, pbbox in self._entries if bbox_intersects(pbbox, bbox_4326)]
+        """Partitions that may intersect ``bbox_4326`` (WGS84).
+
+        Filename-bbox partitions are pruned by MBR; partitions with no filename
+        bbox (legacy ``<n>.parquet``) cannot be pruned, so they are always
+        included and the read-time bbox pre-filter keeps only overlapping rows.
+        """
+        hits = [pf for pf, pbbox in self._entries if bbox_intersects(pbbox, bbox_4326)]
+        hits.extend(self._unknown)
+        return hits
 
     # ------------------------------------------------------------------ schema
 
@@ -127,6 +140,27 @@ class ParquetIndex:
 
     # ------------------------------------------------------------------ reads
 
+    def _read_native_gdf(self, path: Path) -> gpd.GeoDataFrame:
+        """Read a partition to a 4326 GeoDataFrame via pyarrow + WKB decode.
+
+        Avoids ``gpd.read_parquet``, which rejects tiles whose minimal ``geo``
+        metadata lacks geopandas' required ``version`` key (e.g. tiles written by
+        the tiling stage as ``<n>.parquet``).
+        """
+        try:
+            _, geom_col, _ = self._schema_info(path)
+        except Exception:
+            geom_col = "geometry"
+        table = pq.read_table(path)
+        drop = [c for c in BBOX_COLS if c in table.column_names]
+        if drop:
+            table = table.drop(drop)
+        df = table.to_pandas()
+        if geom_col not in df.columns:
+            geom_col = next((c for c in df.columns if "geom" in c.lower()), df.columns[-1])
+        geom = gpd.GeoSeries.from_wkb(df[geom_col].to_numpy(), crs=4326)
+        return gpd.GeoDataFrame(df.drop(columns=[geom_col]), geometry=geom, crs=4326)
+
     def _read_native(self, path: Path):
         """Read a partition in its native CRS (defaulting to EPSG:4326).
 
@@ -134,7 +168,7 @@ class ParquetIndex:
         pre-filtering.  Used for legacy tiles; results are LRU-cached.
         """
         if self._partition_cache_size <= 0:
-            gdf = gpd.read_parquet(path)
+            gdf = self._read_native_gdf(path)
             if gdf.crs is None:
                 gdf = gdf.set_crs(4326)
             return gdf, gdf.geometry.bounds
@@ -145,7 +179,7 @@ class ParquetIndex:
             self._partition_cache.move_to_end(key)
             return cached
 
-        gdf = gpd.read_parquet(path)
+        gdf = self._read_native_gdf(path)
         if gdf.crs is None:
             gdf = gdf.set_crs(4326)
         entry = (gdf, gdf.geometry.bounds)

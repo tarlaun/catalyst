@@ -107,7 +107,9 @@ Guidelines:
   - circle-single-color
 - Use 3 to 6 colors when helpful.
 - assistant_response should be concise and useful to a user.
-No markdown. No prose outside JSON.
+Output MUST be strictly valid JSON (RFC 8259): double-quoted keys and string
+values, real JSON arrays and objects. Do NOT use YAML or "key: value" lines.
+No markdown fences. No prose outside the JSON object.
 """
 
 
@@ -135,7 +137,8 @@ Important:
 - Keep the same dataset unless the user clearly asks to switch datasets.
 - If no dataset switch is requested, selected_dataset must stay the same.
 - Use the current style hint as context and modify it based on the new request.
-- No markdown. No prose outside JSON.
+- Output MUST be strictly valid JSON (RFC 8259): double-quoted keys and string
+  values. Do NOT use YAML or "key: value" lines. No markdown. No prose outside JSON.
 """
 
 
@@ -200,6 +203,8 @@ Guidelines:
   circle-categorical, circle-single-color.
 - Use 3 to 6 colors when helpful. Use distinct color themes per layer so overlaid
   datasets are visually separable.
+Output MUST be strictly valid JSON (RFC 8259): double-quoted keys and string values,
+real JSON arrays and objects. Do NOT use YAML or "key: value" lines.
 No markdown. No prose outside JSON.
 """
 
@@ -318,6 +323,95 @@ def _extract_json_array(text: str) -> List[Any]:
     return parsed
 
 
+def _coerce_scalar(token: str) -> Any:
+    """Best-effort scalar parse for the loose 'key: value' fallback."""
+    s = str(token).strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    low = s.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if low in ("null", "none", "~"):
+        return ""
+    if re.fullmatch(r"[+-]?\d+", s):
+        return int(s)
+    if re.fullmatch(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?", s) and any(c in s for c in ".eE"):
+        try:
+            return float(s)
+        except ValueError:
+            return s
+    return s
+
+
+def _parse_loose_mapping(text: str) -> Dict[str, Any]:
+    """Tolerant parser for the YAML-ish ``key: value`` blocks some models emit
+    instead of JSON (observed with gemini-2.5-flash ignoring "JSON only").
+
+    Handles nested mappings and simple scalar lists via indentation. Tolerates a
+    missing space after the colon (``key:value``). Best effort: never raises on
+    malformed input — returns whatever structure it could recover.
+    """
+    lines: List[tuple] = []
+    for raw in str(text or "").replace("\t", "  ").splitlines():
+        if not raw.strip() or raw.strip().startswith(("#", "```")):
+            continue
+        lines.append((len(raw) - len(raw.lstrip(" ")), raw.strip()))
+
+    n = len(lines)
+    pos = 0
+
+    def parse_block(min_indent: int):
+        nonlocal pos
+        container: Any = None
+        while pos < n:
+            indent, content = lines[pos]
+            if indent < min_indent:
+                break
+            if content.startswith("- "):
+                if container is None:
+                    container = []
+                if not isinstance(container, list):
+                    break
+                pos += 1
+                container.append(_coerce_scalar(content[2:]))
+                continue
+            m = re.match(r"^([^:]+):(.*)$", content)
+            if not m:
+                pos += 1
+                continue
+            if container is None:
+                container = {}
+            if not isinstance(container, dict):
+                break
+            key = m.group(1).strip()
+            rest = m.group(2).strip()
+            pos += 1
+            if rest:
+                container[key] = _coerce_scalar(rest)
+            elif pos < n and lines[pos][0] > indent:
+                container[key] = parse_block(indent + 1)
+            else:
+                container[key] = ""
+        return container if container is not None else {}
+
+    result = parse_block(0)
+    return result if isinstance(result, dict) else {}
+
+
+def _extract_structured_object(text: str) -> Dict[str, Any]:
+    """Parse the model's structured reply. Prefers strict JSON; falls back to the
+    tolerant ``key: value`` parser when the model ignores the JSON-only rule."""
+    try:
+        return _extract_json_object(text)
+    except Exception:
+        pass
+    parsed = _parse_loose_mapping(text)
+    if isinstance(parsed, dict) and parsed:
+        logger.warning("LLM returned non-JSON structured output; recovered via loose parser.")
+        return parsed
+    raise ValueError(f"No JSON or structured object found in LLM response: {text!r}")
+
+
 def _coerce_style_object(value: Any) -> Dict[str, Any]:
     style = value if isinstance(value, dict) else {}
     color_theme = style.get("color_theme")
@@ -382,7 +476,7 @@ def start_style_conversation(
     )
     logger.debug("start_style_conversation raw text: %s", raw.text)
 
-    parsed = _extract_json_object(raw.text)
+    parsed = _extract_structured_object(raw.text)
     return StyleConversationResult(
         assistant_response=_clean_text(parsed.get("assistant_response")),
         selected_dataset=_clean_text(parsed.get("selected_dataset")) or dataset,
@@ -423,7 +517,7 @@ def start_multilayer_conversation(
     )
     logger.debug("start_multilayer_conversation raw text: %s", raw.text)
 
-    parsed = _extract_json_object(raw.text)
+    parsed = _extract_structured_object(raw.text)
     valid_names = {str(c.get("dataset")) for c in candidates_summary}
 
     # Spatial-join / derived-attribute path: only honour it if both datasets are
@@ -503,7 +597,7 @@ def continue_style_conversation(
     )
     logger.debug("continue_style_conversation raw text: %s", raw.text)
 
-    parsed = _extract_json_object(raw.text)
+    parsed = _extract_structured_object(raw.text)
     selected_dataset = _clean_text(parsed.get("selected_dataset")) or dataset
 
     return StyleConversationResult(

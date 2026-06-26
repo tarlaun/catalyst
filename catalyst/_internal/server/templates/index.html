@@ -695,7 +695,13 @@
 
     <main class="map-pane">
         <div class="top-badge">sandboxed iframe runtime: <code>/map.html</code></div>
-        <iframe id="mapFrame" src="/map.html" title="Map runtime" sandbox="allow-scripts"></iframe>
+        <!-- The runtime executes LLM-generated code (new Function). It is loaded
+             CROSS-ORIGIN on the same server (localhost <-> 127.0.0.1) with
+             sandbox="allow-scripts allow-same-origin": the iframe gets a real but
+             DIFFERENT origin, so MapLibre's vector-tile worker runs (a pure
+             opaque-origin sandbox breaks it) while the executed code cannot reach
+             the parent origin's DOM/cookies/storage. src is set by setupRuntimeFrame. -->
+        <iframe id="mapFrame" title="Map runtime" sandbox="allow-scripts allow-same-origin"></iframe>
     </main>
 </div>
 
@@ -1391,6 +1397,26 @@
             postToMap({ type: "starlet:ping", payload: {} });
         }, 150);
     });
+
+    (function setupRuntimeFrame() {
+        // Load the runtime CROSS-ORIGIN on the same server so MapLibre's worker
+        // works (it needs a real origin) while the LLM code executed via
+        // new Function() stays isolated from the parent origin's DOM/cookies/storage.
+        // localhost <-> 127.0.0.1 are distinct browser origins that both reach this
+        // same server (and the same SSH forward).
+        const loc = window.location;
+        let host = null;
+        if (loc.hostname === "localhost") host = "127.0.0.1";
+        else if (loc.hostname === "127.0.0.1") host = "localhost";
+        const port = loc.port ? ":" + loc.port : "";
+        if (host) {
+            els.mapFrame.src = `${loc.protocol}//${host}${port}/map.html`;
+        } else {
+            // Unknown host: fall back to same-origin (map works; isolation weaker).
+            console.warn("[catalyst] runtime served same-origin (no sibling host for cross-origin isolation)");
+            els.mapFrame.src = "/map.html";
+        }
+    })();
 
     async function initialize() {
         updateStatus();

@@ -739,11 +739,6 @@ def create_app(
             notes = [str(notes)]
 
         if is_categorical:
-            palette = [_normalize_hex_color(c, "#1f78b4") for c in theme_colors]
-            palette = [c for c in palette if c]
-            if not palette:
-                palette = _categorical_palette()
-
             categorical_values: List[str] = []
             if attr_summary:
                 for item in attr_summary.get("top_k") or []:
@@ -751,6 +746,25 @@ def create_app(
                     if value is None:
                         continue
                     categorical_values.append(_normalize_unicode_text(value))
+
+            # Keep only the valid, DISTINCT hex colors the model provided; invalid
+            # colors are dropped (not collapsed to one fallback, which would make
+            # every category identical). Supplement from the qualitative palette so
+            # each category gets a distinct color.
+            palette: List[str] = []
+            for c in theme_colors:
+                hexc = _normalize_hex_color(c, "")
+                if hexc and hexc not in palette:
+                    palette.append(hexc)
+            needed = max(len(categorical_values), 1)
+            if len(palette) < needed:
+                for c in _categorical_palette():
+                    if c not in palette:
+                        palette.append(c)
+                    if len(palette) >= needed:
+                        break
+            if not palette:
+                palette = _categorical_palette()
 
             stops = [
                 {"value": value, "color": palette[i % len(palette)]}
