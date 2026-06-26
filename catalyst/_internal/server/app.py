@@ -30,6 +30,12 @@ from .llm import (
 from .llm.provider import LLMProviderError
 from .tiler.tiler import VectorTiler
 
+# Env-driven so the same code serves the dev box (root) and the public
+# deployment (mounted under a path prefix, e.g. /catalyst, behind a proxy).
+# LLM_PROVIDER=fallback uses the gemini->ollama chain (see llm/factory.py).
+_LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").strip().lower() or "gemini"
+_BASE_PATH = os.environ.get("CATALYST_BASE_PATH", "").rstrip("/")
+
 try:
     from ... import build as starlet_build
 except Exception:  # pragma: no cover
@@ -1138,7 +1144,7 @@ def create_app(
                 candidates_summary=candidate_payload,
                 user_query=normalized_query,
                 max_layers=3,
-                provider_name="gemini",
+                provider_name=_LLM_PROVIDER,
             )
             # Spatial-join / derived-attribute request: build a new dataset by
             # combining two datasets, then style it by the derived attribute.
@@ -1271,7 +1277,7 @@ def create_app(
                 previous_interaction_id=_normalize_unicode_text(interaction_id),
                 selected_attributes_hint=[_normalize_unicode_text(x) for x in (current_attributes or [])],
                 current_style_hint=current_style or {},
-                provider_name="gemini",
+                provider_name=_LLM_PROVIDER,
                 temperature=0.2,
             )
         except (LLMProviderError, Exception) as exc:  # noqa: BLE001 - intentional broad fallback
@@ -1599,12 +1605,12 @@ def create_app(
     @app.get("/")
     def index():
         logger.info("Serving index page")
-        return render_template("index.html")
+        return render_template("index.html", base_path=_BASE_PATH)
 
     @app.get("/map.html")
     def map_page():
         logger.info("Serving map runtime page")
-        return render_template("map.html")
+        return render_template("map.html", base_path=_BASE_PATH)
 
     @app.route("/<path:filename>")
     def serve_file(filename):
@@ -1871,7 +1877,7 @@ def create_app(
                     user_query=user_query,
                     current_style=current_style,
                     previous_interaction_id=None,
-                    provider_name="gemini",
+                    provider_name=_LLM_PROVIDER,
                     temperature=0.2,
                 )
                 llm_ms = (perf_counter() - llm_t0) * 1000.0
@@ -1917,7 +1923,7 @@ def create_app(
                 user_query=user_query,
                 current_style=current_style,
                 previous_interaction_id=None,
-                provider_name="gemini",
+                provider_name=_LLM_PROVIDER,
                 temperature=0.2,
             )
             llm_ms = (perf_counter() - llm_t0) * 1000.0

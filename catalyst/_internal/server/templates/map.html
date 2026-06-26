@@ -33,6 +33,10 @@
   <div id="legend"></div>
 <script>
 "use strict";
+// Path prefix this runtime is mounted under ("/catalyst" on the public site, ""
+// on the dev box). Derived from the served URL so tile/dataset fetches resolve
+// behind a reverse proxy.
+const CATALYST_BASE = window.location.pathname.replace(/\/map\.html?$/i, "");
 /*
  * Catalyst map runtime (loaded inside a sandboxed <iframe sandbox="allow-scripts">).
  *
@@ -86,7 +90,7 @@ function sourceId(dataset) { return "src__" + dataset.replace(/[^a-zA-Z0-9_]/g, 
 function layerId(dataset, kind) { return "lyr__" + dataset.replace(/[^a-zA-Z0-9_]/g, "_") + "__" + kind; }
 function tileUrl(dataset) {
   // On-the-fly tiling route: /<dataset>/{z}/{x}/{y}.mvt
-  return window.location.origin + "/" + encodeURIComponent(dataset) + "/{z}/{x}/{y}.mvt";
+  return window.location.origin + CATALYST_BASE + "/" + encodeURIComponent(dataset) + "/{z}/{x}/{y}.mvt";
 }
 
 function colorExpression(renderer) {
@@ -200,7 +204,7 @@ const _bboxCache = new Map();
 async function datasetBBox(dataset) {
   if (_bboxCache.has(dataset)) return _bboxCache.get(dataset);
   try {
-    const resp = await fetch(window.location.origin + "/datasets/" + encodeURIComponent(dataset) + ".json");
+    const resp = await fetch(window.location.origin + CATALYST_BASE + "/datasets/" + encodeURIComponent(dataset) + ".json");
     const meta = await resp.json();
     const bbox = Array.isArray(meta.bbox) && meta.bbox.length === 4 ? meta.bbox : null;
     _bboxCache.set(dataset, bbox);

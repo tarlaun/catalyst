@@ -706,6 +706,10 @@
 </div>
 
 <script>
+    // Path prefix the app is mounted under ("/catalyst" on the public site, "" on
+    // the dev box). Derived from the served URL so every API/tile/map URL works
+    // behind a reverse proxy without hard-coding the mount point.
+    const CATALYST_BASE = window.location.pathname.replace(/\/(?:index\.html?)?$/i, "");
     const state = {
         interactionId: "",
         dataset: "",
@@ -1037,7 +1041,7 @@
     }
 
     async function postJSON(url, payload) {
-        const resp = await fetch(url, {
+        const resp = await fetch(CATALYST_BASE + url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
@@ -1057,7 +1061,7 @@
     }
 
     async function getJSON(url) {
-        const resp = await fetch(url);
+        const resp = await fetch(CATALYST_BASE + url);
         let data = null;
         try {
             data = await resp.json();
@@ -1176,7 +1180,7 @@
         setUploadStatus("Uploading dataset...");
 
         try {
-            const resp = await fetch("/api/upload-dataset", {
+            const resp = await fetch(CATALYST_BASE + "/api/upload-dataset", {
                 method: "POST",
                 body: form
             });
@@ -1201,7 +1205,7 @@
         if (!currentUploadJobId) return;
 
         try {
-            const resp = await fetch(`/api/upload-dataset/${currentUploadJobId}`);
+            const resp = await fetch(CATALYST_BASE + `/api/upload-dataset/${currentUploadJobId}`);
             const data = await resp.json();
 
             if (!resp.ok) {
@@ -1410,11 +1414,11 @@
         else if (loc.hostname === "127.0.0.1") host = "localhost";
         const port = loc.port ? ":" + loc.port : "";
         if (host) {
-            els.mapFrame.src = `${loc.protocol}//${host}${port}/map.html`;
+            els.mapFrame.src = `${loc.protocol}//${host}${port}${CATALYST_BASE}/map.html`;
         } else {
             // Unknown host: fall back to same-origin (map works; isolation weaker).
             console.warn("[catalyst] runtime served same-origin (no sibling host for cross-origin isolation)");
-            els.mapFrame.src = "/map.html";
+            els.mapFrame.src = CATALYST_BASE + "/map.html";
         }
     })();
 
