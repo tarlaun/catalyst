@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 _ENV_KEY = "GEMINI_API_KEY"
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
-_DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+_DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 
 
 def _ssl_context() -> Optional[ssl.SSLContext]:
