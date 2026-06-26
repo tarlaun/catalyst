@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shutil
 
 from flask import Flask, Response, render_template, request, send_from_directory
 from werkzeug.utils import secure_filename
@@ -1956,5 +1957,65 @@ def create_app(
         except Exception as e:
             logger.exception("[GenerateMapCode] Failed for query=%r", user_query)
             return _json_response({"error": f"Map code generation failed: {e}"}, 500)
+
+    # ------------------------------------------------------------------ ephemeral
+    # Optionally avoid permanently saving join/aggregate-derived datasets (e.g. on
+    # a public demo): remove them after CATALYST_DERIVED_TTL_MIN minutes. Default
+    # 0 = disabled (derived datasets persist + are reused, as before).
+    _derived_ttl_min = float(os.environ.get("CATALYST_DERIVED_TTL_MIN", "0") or 0)
+
+    def _cleanup_derived_datasets(force_all: bool = False) -> int:
+        """Remove materialized derived datasets (dirs carrying a ``derived.json``
+        marker) plus their ``_uploads`` parquet. ``force_all`` ignores the TTL."""
+        if _derived_ttl_min <= 0 and not force_all:
+            return 0
+        now_ts = datetime.now(timezone.utc).timestamp()
+        removed: List[str] = []
+        for d in list(data_root.glob("*")):
+            marker = d / "derived.json"
+            if not (d.is_dir() and marker.exists()):
+                continue
+            try:
+                age_min = (now_ts - marker.stat().st_mtime) / 60.0
+            except OSError:
+                continue
+            if not force_all and age_min < _derived_ttl_min:
+                continue
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+                up = uploads_root / f"{d.name}.parquet"
+                if up.exists():
+                    up.unlink()
+                tiler_cache.pop(d.name, None)
+                removed.append(d.name)
+            except Exception:
+                logger.exception("[Derive] cleanup failed for %s", d.name)
+        if removed:
+            logger.info("[Derive] removed %d ephemeral derived dataset(s): %s",
+                        len(removed), ", ".join(removed))
+            try:
+                build_catalog_index(data_root=data_root, out_dir=data_root / "_catalog",
+                                    sync_pgvector=False)
+            except Exception:
+                logger.exception("[Derive] catalogue reindex after cleanup failed")
+            _catalog_runtime["router"] = None
+            _catalog_runtime["mtime"] = None
+        return len(removed)
+
+    if _derived_ttl_min > 0:
+        def _derived_sweeper() -> None:
+            import time as _time
+            interval = max(30.0, min(_derived_ttl_min * 60.0, 300.0))
+            while True:
+                _time.sleep(interval)
+                try:
+                    _cleanup_derived_datasets()
+                except Exception:
+                    logger.exception("[Derive] sweeper iteration failed")
+
+        _cleanup_derived_datasets(force_all=True)   # clear leftovers from prior runs
+        Thread(target=_derived_sweeper, daemon=True).start()
+        logger.info("[Derive] ephemeral mode ON: derived datasets removed after %.0f min",
+                    _derived_ttl_min)
 
     return app
