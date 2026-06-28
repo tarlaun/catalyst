@@ -194,6 +194,35 @@ def _write_derived_tile(gdf: gpd.GeoDataFrame, out_dir: str, idx: int, add_pushd
     return len(gdf)
 
 
+def _patch_stats_attribute(out_dir: str, attr_name: str, attr_stats: dict) -> None:
+    """Add/replace one attribute entry in a dataset's ``stats/attributes.json``."""
+    import json
+    import logging
+
+    path = os.path.join(out_dir, "stats", "attributes.json")
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+        else:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            doc = {"attributes": []}
+        if not isinstance(doc, dict):
+            doc = {"attributes": doc if isinstance(doc, list) else []}
+        attrs = doc.get("attributes")
+        if not isinstance(attrs, list):
+            attrs = []
+        attrs = [a for a in attrs if not (isinstance(a, dict) and a.get("name") == attr_name)]
+        attrs.append({"name": attr_name, "stats": attr_stats})
+        doc["attributes"] = attrs
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "tiled derive: could not patch stats for %s", attr_name, exc_info=True
+        )
+
+
 def derive_dataset_tiled(
     *,
     data_root: str,
@@ -232,6 +261,13 @@ def derive_dataset_tiled(
     out_tiles_dir = os.path.join(str(out_dir), "parquet_tiles")
     os.makedirs(out_tiles_dir, exist_ok=True)
 
+    import collections
+
+    is_categorical = aggregate == "dominant"
+    cat_counts: "collections.Counter" = collections.Counter()
+    num_min = num_max = None
+    non_null = 0
+
     t_join = perf_counter()
     total_rows = 0
     for i, tile_path in enumerate(tiles):
@@ -249,6 +285,16 @@ def derive_dataset_tiled(
                 value_attribute=value_attribute, weight=weight,
                 output_attribute=output_attribute,
             )
+        # Accumulate the derived attribute's distribution so we can write correct
+        # stats (categorical top_k / numeric min-max) for styling + the catalogue.
+        col = tgdf[output_attribute].dropna()
+        non_null += int(len(col))
+        if is_categorical:
+            cat_counts.update(str(v) for v in col.tolist())
+        elif len(col):
+            cmin, cmax = float(col.min()), float(col.max())
+            num_min = cmin if num_min is None else min(num_min, cmin)
+            num_max = cmax if num_max is None else max(num_max, cmax)
         total_rows += _write_derived_tile(tgdf, out_tiles_dir, i, add_pushdown)
     join_write_s = perf_counter() - t_join
 
@@ -258,6 +304,17 @@ def derive_dataset_tiled(
         src_aux = os.path.join(target_dir, aux)
         if os.path.isdir(src_aux):
             shutil.copytree(src_aux, os.path.join(str(out_dir), aux), dirs_exist_ok=True)
+
+    # Add the derived attribute to the copied stats so the map can colour by it.
+    if is_categorical:
+        attr_stats = {
+            "non_null_count": non_null,
+            "approx_distinct": len(cat_counts),
+            "top_k": [{"value": v, "count": int(c)} for v, c in cat_counts.most_common(64)],
+        }
+    else:
+        attr_stats = {"non_null_count": non_null, "min": num_min, "max": num_max, "top_k": []}
+    _patch_stats_attribute(str(out_dir), output_attribute, attr_stats)
 
     return {
         "dataset": os.path.basename(str(out_dir)),
