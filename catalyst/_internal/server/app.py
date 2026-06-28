@@ -954,7 +954,9 @@ def create_app(
                 "renderer": {
                     "mode": "categorical",
                     "attribute": target_attribute,
-                    "fallback_color": palette[0],
+                    # Neutral grey for "other / no value" so it is visually
+                    # distinct from the first category (which also uses palette[0]).
+                    "fallback_color": "#9aa0a6",
                     "stops": stops,
                 },
                 "notes": [_normalize_unicode_text(n) for n in notes],
