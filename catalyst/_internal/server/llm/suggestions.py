@@ -416,18 +416,23 @@ def _coerce_style_object(value: Any) -> Dict[str, Any]:
     style = value if isinstance(value, dict) else {}
     color_theme = style.get("color_theme")
     if not isinstance(color_theme, dict):
-        color_theme = {"name": "custom", "colors": ["#4f83ff"]}
+        color_theme = {"name": "custom", "colors": []}
 
     colors = color_theme.get("colors")
-    if not isinstance(colors, list):
-        colors = ["#4f83ff"]
+    if isinstance(colors, str):
+        colors = [colors] if colors.strip() else []
+    elif not isinstance(colors, list):
+        colors = []
 
+    # Deliberately do NOT substitute a default colour here: leaving the list empty
+    # lets the server-side normaliser recover a colour named in the theme/prose
+    # (e.g. "bright-red") instead of silently rendering a fallback blue.
     return {
         "target_attribute": _clean_text(style.get("target_attribute")),
         "style_type": _clean_text(style.get("style_type")) or "fill-single-color",
         "color_theme": {
             "name": _clean_text(color_theme.get("name")) or "custom",
-            "colors": [str(c) for c in colors if c is not None] or ["#4f83ff"],
+            "colors": [str(c) for c in colors if c is not None],
         },
         "opacity": float(style.get("opacity", 0.85)),
         "stroke_width": float(style.get("stroke_width", 1.5)),

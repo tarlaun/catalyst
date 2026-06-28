@@ -712,7 +712,35 @@ def create_app(
         color = str(color or "").strip()
         if re.fullmatch(r"#[0-9a-fA-F]{6}", color):
             return color
+        if re.fullmatch(r"#[0-9a-fA-F]{3}", color):  # #f00 -> #ff0000
+            return "#" + "".join(ch * 2 for ch in color[1:])
         return fallback
+
+    # Common colour words -> hex, so a request like "make it red" survives even
+    # when the model puts the colour only in the theme name / prose and leaves the
+    # structured ``colors`` list empty or invalid.
+    _COLOR_WORDS = {
+        "bright red": "#ff0000", "red": "#e6194b", "crimson": "#dc143c", "scarlet": "#ff2400",
+        "dark green": "#006400", "lime": "#bfff00", "green": "#2ca02c",
+        "navy": "#001f7f", "sky blue": "#87ceeb", "light blue": "#87ceeb", "blue": "#1f78b4",
+        "yellow": "#ffd700", "gold": "#ffd700", "amber": "#ffbf00",
+        "orange": "#ff7f0e", "purple": "#9467bd", "violet": "#8a2be2", "indigo": "#4b0082",
+        "magenta": "#ff00ff", "pink": "#ff69b4", "brown": "#8c564b", "teal": "#17becf",
+        "cyan": "#00bcd4", "turquoise": "#40e0d0", "black": "#222222", "white": "#ffffff",
+        "gray": "#7f7f7f", "grey": "#7f7f7f", "silver": "#c0c0c0",
+    }
+
+    def _color_word_to_hex(text: str) -> str:
+        t = str(text or "").strip().lower().replace("_", " ").replace("-", " ")
+        if not t:
+            return ""
+        if t in _COLOR_WORDS:
+            return _COLOR_WORDS[t]
+        # longest phrase first so "bright red"/"sky blue" beat "red"/"blue"
+        for word in sorted(_COLOR_WORDS, key=len, reverse=True):
+            if re.search(rf"\b{re.escape(word)}\b", t):
+                return _COLOR_WORDS[word]
+        return ""
 
     def _categorical_palette() -> List[str]:
         return [
@@ -792,8 +820,16 @@ def create_app(
         target_attribute = _normalize_unicode_text(style.get("target_attribute", "")).strip()
         attr_summary = _find_attribute_summary(dataset_summary, target_attribute) if target_attribute else None
         attr_role = _attribute_role_from_summary(attr_summary or {})
-        is_categorical = "categorical" in style_type or attr_role in {"categorical", "categorical_text"}
-        is_gradient = "gradient" in style_type
+        style_type_l = style_type.lower()
+        # An explicit single/uniform/solid intent wins over the attribute's role:
+        # "make every zone red" must not be re-expanded into a per-category palette
+        # just because the (still-set) target attribute happens to be categorical.
+        wants_single = any(w in style_type_l for w in ("single", "uniform", "solid", "simple", "flat"))
+        is_gradient = ("gradient" in style_type_l) and not wants_single
+        is_categorical = (
+            not wants_single and not is_gradient
+            and ("categorical" in style_type_l or attr_role in {"categorical", "categorical_text"})
+        )
 
         color_theme = style.get("color_theme") or {}
         theme_name = _normalize_unicode_text(color_theme.get("name", "")).strip() or "custom"
@@ -892,9 +928,15 @@ def create_app(
                 "notes": [_normalize_unicode_text(n) for n in notes],
             }
 
-        fallback_color = "#4682B4"
-        if theme_colors:
-            fallback_color = _normalize_hex_color(theme_colors[0], fallback_color)
+        # Resolve the single colour, recovering one named only in the theme
+        # name / legend / notes (e.g. model returns name="bright-red" with an
+        # empty/invalid colours list) rather than falling back to the default blue.
+        single_color = ""
+        for cand in list(theme_colors) + [theme_name, legend_title] + [str(n) for n in notes]:
+            single_color = _normalize_hex_color(cand, "") or _color_word_to_hex(cand)
+            if single_color:
+                break
+        fallback_color = single_color or "#4682B4"
 
         return {
             "dataset": dataset,
