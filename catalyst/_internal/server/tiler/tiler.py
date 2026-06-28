@@ -50,7 +50,10 @@ class VectorTiler:
 
     def __init__(self, dataset_root: str, memory_cache_size: int = 256) -> None:
         self.dataset_root = Path(dataset_root)
-        self.parquet_dir = self.dataset_root / "parquet_tiles"
+        # Prefer a pushdown sidecar (parquet_tiles_pd: filename-bbox + per-row
+        # _bbox_ columns) when present, so legacy datasets serve on-the-fly fast.
+        pd_dir = self.dataset_root / "parquet_tiles_pd"
+        self.parquet_dir = pd_dir if pd_dir.is_dir() else self.dataset_root / "parquet_tiles"
         self.mvt_dir = self.dataset_root / "mvt"
         self.index = ParquetIndex(self.parquet_dir)
 

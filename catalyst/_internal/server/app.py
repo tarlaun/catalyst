@@ -490,6 +490,24 @@ def create_app(
             )
         return tiler_cache[dataset]
 
+    _virtual_derive_cache: Dict[Tuple[str, str, str], Any] = {}
+
+    def _get_virtual_tiler(target: str, source: str, value_attribute: str):
+        """Cached lazy-derive tiler (joins `source.value_attribute` into each
+        requested tile of `target` at serve time — nothing is materialized)."""
+        key = (target, source, value_attribute)
+        vt = _virtual_derive_cache.get(key)
+        if vt is None:
+            from .derive.spatial_aggregate import load_dataset_gdf
+            from .tiler.virtual_derive import VirtualDeriveTiler
+            src_gdf = load_dataset_gdf(str(data_root / source))
+            vt = VirtualDeriveTiler(
+                str(data_root / target), src_gdf, value_attribute,
+                memory_cache_size=cache_size,
+            )
+            _virtual_derive_cache[key] = vt
+        return vt
+
     def _catalog_index_path() -> Path:
         return data_root / "_catalog" / CATALOG_FILENAME
 
@@ -1306,6 +1324,62 @@ def create_app(
                 assistant_response = _normalize_unicode_text(multi.assistant_response or "")
                 derive_target = _normalize_unicode_text(str(spec.get("target_dataset", ""))).strip()
                 derive_source = _normalize_unicode_text(str(spec.get("source_dataset", ""))).strip()
+                derive_value = _normalize_unicode_text(str(spec.get("value_attribute", ""))).strip()
+
+                # LIVE lazy derive: when a value/categorical source is small, color
+                # the target by the source value at each feature's location, joined
+                # per tile at serve time (no build, no wait). Instant + interactive.
+                if (
+                    derive_target and derive_source and derive_value
+                    and _dataset_exists(derive_target) and _dataset_exists(derive_source)
+                    and 0 < _dataset_row_count(derive_source) <= _TILED_DERIVE_MAX_SOURCE
+                ):
+                    try:
+                        tgt_summary = _dataset_summary_for_llm(derive_target)
+                        src_summary = _dataset_summary_for_llm(derive_source)
+                        src_attr = _find_attribute_summary(src_summary, derive_value)
+                        syn = {
+                            "dataset": derive_target,
+                            "geometry": tgt_summary.get("geometry", []),
+                            "attributes": list(tgt_summary.get("attributes", [])),
+                        }
+                        if src_attr:
+                            syn["attributes"].append(src_attr)
+                        geom_kind = _infer_geometry_kind_from_summary(syn)
+                        raw_style = {
+                            "target_attribute": derive_value,
+                            "style_type": f"{_GEOM_PREFIX.get(geom_kind, 'fill')}-categorical",
+                            "color_theme": {"name": "category", "colors": _categorical_palette()},
+                            "opacity": 0.9, "stroke_width": 0.6, "radius": 3.0,
+                            "legend_title": derive_value.replace("_", " ").title(),
+                        }
+                        live_style = _normalize_style_for_client(
+                            dataset=derive_target, dataset_summary=syn, style=raw_style,
+                        )
+                        msg = assistant_response or (
+                            f"Coloring {derive_target} by {derive_value.replace('_', ' ')} "
+                            f"from {derive_source} — joined live as you pan/zoom."
+                        )
+                        return {
+                            "mode": "derive-live", "query": normalized_query,
+                            "interaction_id": interaction_id,
+                            "assistant_response": msg,
+                            "selection_mode": "derive-live",
+                            "selected_dataset": derive_target,
+                            "selected_dataset_score": 1.0,
+                            "selected_attributes": [derive_value],
+                            "style_intent": f"color {derive_target} by {derive_value}",
+                            "style": live_style,
+                            "derive_live": {
+                                "target": derive_target,
+                                "source": derive_source,
+                                "value_attribute": derive_value,
+                            },
+                            "top_k": candidate_payload,
+                        }, 200
+                    except Exception:
+                        logger.exception("[ChatStyle] live-derive setup failed; using materialized build")
+
                 job_id = uuid4().hex
                 _set_build_job(
                     job_id, status="queued", step="queued",
@@ -1514,6 +1588,20 @@ def create_app(
             elapsed_ms,
         )
         return Response(data, mimetype="application/vnd.mapbox-vector-tile")
+
+    @app.get("/api/derive-live/<target>/<source>/<value_attribute>/<int:z>/<int:x>/<int:y>.mvt")
+    def serve_derive_live_tile(target, source, value_attribute, z, x, y):
+        """Lazy cross-dataset derive tile: target features annotated with the
+        source value at their location, joined on demand (no materialization)."""
+        if not _dataset_exists(target) or not _dataset_exists(source):
+            return _json_response({"error": "target or source dataset not found"}, 404)
+        try:
+            tiler = _get_virtual_tiler(target, source, value_attribute)
+            data = tiler.get_tile(z, x, y)
+            return Response(data, mimetype="application/vnd.mapbox-vector-tile")
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[DeriveLive] tile failed target=%s source=%s", target, source)
+            return _json_response({"error": f"derive-live tile failed: {e}"}, 500)
 
     @app.get("/datasets/<path:filepath>")
     def serve_dataset_file(filepath):

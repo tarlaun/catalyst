@@ -1006,6 +1006,22 @@
     }
 
     function applyStateToMap() {
+        // Lazy cross-dataset derive: one virtual layer joined per tile on demand.
+        if (state.deriveLive && state.deriveLive.target) {
+            const dl = state.deriveLive;
+            const vid = `live__${dl.target}__${dl.value_attribute}`;
+            postToMap({
+                type: "starlet:set-layers",
+                payload: { layers: [{
+                    dataset: vid,
+                    style: state.currentStyle,
+                    derive: { target: dl.target, source: dl.source, value_attribute: dl.value_attribute },
+                    fitDataset: dl.target
+                }] }
+            });
+            return;
+        }
+
         // Cross-dataset overlay path: render the whole layer stack at once.
         if (Array.isArray(state.layers) && state.layers.length) {
             postToMap({
@@ -1083,6 +1099,10 @@
         // Preserve the candidate table across follow-up turns (which return none).
         state.topK = Array.isArray(data.top_k) && data.top_k.length ? data.top_k : state.topK;
         state.timings = data.timings || null;
+
+        // Lazy cross-dataset derive: a virtual layer joined per tile at serve time.
+        state.deriveLive = data.derive_live || null;
+        if (state.deriveLive) state.layers = [];  // it drives the map, not the overlay stack
 
         // Cross-dataset overlay: either replace the whole stack (initial turn) or
         // merge a single refined layer into the existing overlay (follow-up).

@@ -88,9 +88,18 @@ let mapLoaded = false;
 // ----------------------------------------------------------------------------
 function sourceId(dataset) { return "src__" + dataset.replace(/[^a-zA-Z0-9_]/g, "_"); }
 function layerId(dataset, kind) { return "lyr__" + dataset.replace(/[^a-zA-Z0-9_]/g, "_") + "__" + kind; }
+// Per-layer tile-URL overrides (e.g. lazy cross-dataset derive layers).
+const tileUrlOverrides = {};
 function tileUrl(dataset) {
+  if (tileUrlOverrides[dataset]) return tileUrlOverrides[dataset];
   // On-the-fly tiling route: /<dataset>/{z}/{x}/{y}.mvt
   return window.location.origin + CATALYST_BASE + "/" + encodeURIComponent(dataset) + "/{z}/{x}/{y}.mvt";
+}
+function deriveLiveUrl(d) {
+  // Lazy derive route: /api/derive-live/<target>/<source>/<value_attr>/{z}/{x}/{y}.mvt
+  return window.location.origin + CATALYST_BASE + "/api/derive-live/"
+    + encodeURIComponent(d.target) + "/" + encodeURIComponent(d.source) + "/"
+    + encodeURIComponent(d.value_attribute) + "/{z}/{x}/{y}.mvt";
 }
 
 function colorExpression(renderer) {
@@ -281,12 +290,18 @@ function renderLegend() {
 // Replace the whole stack with `specs` = [{dataset, style, opacity?, label?}]
 async function setLayers(specs) {
   const wanted = new Set();
+  const fitList = [];
   for (const spec of (specs || [])) {
     if (!spec || !spec.dataset) continue;
+    // A lazy-derive layer carries a `derive` spec -> custom tile URL.
+    if (spec.derive && spec.derive.target) tileUrlOverrides[spec.dataset] = deriveLiveUrl(spec.derive);
+    else if (spec.tileUrl) tileUrlOverrides[spec.dataset] = spec.tileUrl;
+    else delete tileUrlOverrides[spec.dataset];
     wanted.add(spec.dataset);
     const style = spec.style || defaultStyleFor("unknown");
     if (spec.opacity != null) style.opacity = spec.opacity;
     applyStyleToDataset(spec.dataset, style);
+    fitList.push(spec.fitDataset || spec.dataset);
   }
   for (const existing of Array.from(layers.keys())) {
     if (!wanted.has(existing)) removeDataset(existing);
@@ -294,7 +309,7 @@ async function setLayers(specs) {
   const list = Array.from(wanted);
   activeDataset = list.length ? list[list.length - 1] : "";
   renderLegend();
-  if (list.length) await fitToDatasets(list);
+  if (fitList.length) await fitToDatasets(fitList);
 }
 
 // ----------------------------------------------------------------------------
