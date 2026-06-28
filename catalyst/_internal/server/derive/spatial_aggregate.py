@@ -137,3 +137,139 @@ def derive_dataset(
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     result.to_parquet(out_path)
     return out_path
+
+
+# ---------------------------------------------------------------------------
+# Tile-aligned derive: reuse the target's existing spatial partitions instead of
+# loading everything + re-partitioning + rebuilding the MVT pyramid.
+# ---------------------------------------------------------------------------
+
+def _read_tile_gdf(path: str) -> gpd.GeoDataFrame:
+    """Read one target partition into a 4326 GeoDataFrame (no internal columns)."""
+    import pyarrow.parquet as pq
+    from shapely import from_wkb
+
+    table = pq.read_table(path)
+    drop = [c for c in _INTERNAL_COLS if c in table.column_names]
+    if drop:
+        table = table.drop(drop)
+    df = table.to_pandas()
+    geom_col = "geometry" if "geometry" in df.columns else next(
+        (c for c in df.columns if "geom" in c.lower()), df.columns[-1]
+    )
+    geom = from_wkb(df[geom_col].to_numpy())
+    return gpd.GeoDataFrame(df.drop(columns=[geom_col]), geometry=geom, crs="EPSG:4326")
+
+
+def _encode_coord(v: float) -> str:
+    """Encode a coordinate as ``int_frac3`` to match ``parse_parquet_bbox``."""
+    neg = v < 0
+    av = abs(float(v))
+    ip = int(av)
+    fp = int(round((av - ip) * 1000))
+    if fp >= 1000:
+        ip += 1
+        fp -= 1000
+    return f"{'-' if neg else ''}{ip}_{fp:03d}"
+
+
+def _write_derived_tile(gdf: gpd.GeoDataFrame, out_dir: str, idx: int, add_pushdown: bool) -> int:
+    """Write one augmented partition with a filename bbox (and per-row ``_bbox_*``
+    covering columns) so the derived dataset serves on-the-fly with pruning."""
+    if len(gdf) == 0:
+        return 0
+    minx, miny, maxx, maxy = (float(v) for v in gdf.total_bounds)
+    fname = (
+        f"tile_{idx:06d}__{_encode_coord(minx)}_{_encode_coord(miny)}_"
+        f"{_encode_coord(maxx)}_{_encode_coord(maxy)}.parquet"
+    )
+    g = gdf
+    if add_pushdown:
+        b = gdf.geometry.bounds
+        g = gdf.assign(
+            _bbox_xmin=b["minx"].to_numpy(), _bbox_ymin=b["miny"].to_numpy(),
+            _bbox_xmax=b["maxx"].to_numpy(), _bbox_ymax=b["maxy"].to_numpy(),
+        )
+    g.to_parquet(os.path.join(out_dir, fname))
+    return len(gdf)
+
+
+def derive_dataset_tiled(
+    *,
+    data_root: str,
+    target_dataset: str,
+    source_dataset: str,
+    predicate: str,
+    aggregate: str,
+    value_attribute: Optional[str],
+    weight: Optional[str],
+    output_attribute: str,
+    out_dir: str,
+    add_pushdown: bool = True,
+) -> dict:
+    """Tile-aligned cross-dataset derive.
+
+    Reuses the *target's existing spatial partitions*: the source (assumed small)
+    is loaded once and each target partition is joined against only the source
+    features overlapping that partition, then written straight back as an
+    augmented tile. No global re-partition and no MVT pre-generation — the result
+    serves on-the-fly (with ``_bbox_`` pushdown). Each target row appears in
+    exactly one partition, so per-partition aggregation is exact.
+
+    Returns timing + shape metadata.
+    """
+    import shutil
+    from time import perf_counter
+
+    t0 = perf_counter()
+    target_dir = os.path.join(str(data_root), target_dataset)
+    source = load_dataset_gdf(os.path.join(str(data_root), source_dataset))
+    src_load_s = perf_counter() - t0
+
+    tiles = sorted(glob.glob(os.path.join(target_dir, "parquet_tiles", "*.parquet")))
+    if not tiles:
+        raise FileNotFoundError(f"No parquet_tiles under {target_dir}")
+    out_tiles_dir = os.path.join(str(out_dir), "parquet_tiles")
+    os.makedirs(out_tiles_dir, exist_ok=True)
+
+    t_join = perf_counter()
+    total_rows = 0
+    for i, tile_path in enumerate(tiles):
+        tgdf = _read_tile_gdf(tile_path)
+        if len(tgdf) == 0:
+            continue
+        minx, miny, maxx, maxy = tgdf.total_bounds
+        ssub = source.cx[minx:maxx, miny:maxy]  # only source overlapping this tile
+        if len(ssub) == 0:
+            tgdf = tgdf.copy()
+            tgdf[output_attribute] = 0 if aggregate == "count" else None
+        else:
+            tgdf = spatial_aggregate(
+                tgdf, ssub, predicate=predicate, aggregate=aggregate,
+                value_attribute=value_attribute, weight=weight,
+                output_attribute=output_attribute,
+            )
+        total_rows += _write_derived_tile(tgdf, out_tiles_dir, i, add_pushdown)
+    join_write_s = perf_counter() - t_join
+
+    # Geometry is unchanged, so the density histograms and geometry MBR stats are
+    # still valid — copy them instead of recomputing.
+    for aux in ("histograms", "stats"):
+        src_aux = os.path.join(target_dir, aux)
+        if os.path.isdir(src_aux):
+            shutil.copytree(src_aux, os.path.join(str(out_dir), aux), dirs_exist_ok=True)
+
+    return {
+        "dataset": os.path.basename(str(out_dir)),
+        "output_attribute": output_attribute,
+        "target_dataset": target_dataset,
+        "source_dataset": source_dataset,
+        "aggregate": aggregate,
+        "value_attribute": value_attribute,
+        "predicate": predicate,
+        "rows": total_rows,
+        "tiles": len(tiles),
+        "source_load_s": round(src_load_s, 2),
+        "join_write_s": round(join_write_s, 2),
+        "derive_seconds": round(perf_counter() - t0, 2),
+    }
