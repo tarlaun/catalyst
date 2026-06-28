@@ -387,6 +387,68 @@ def create_app(
             logger.exception("[DeriveJob] Failed for spec=%s", spec)
             _set_build_job(job_id, status="failed", step="error", message=str(e))
 
+    def _build_derive_response(
+        info: Dict[str, Any], query: str, interaction_id: str, assistant_response: str
+    ) -> Dict[str, Any]:
+        """Build the chat-style 'derive complete' payload from a finished derive.
+
+        Identical shape to a normal initial-turn response (selected_dataset =
+        the derived dataset, styled by the derived attribute), so the client
+        renders it through the same path.
+        """
+        derived = info["dataset"]
+        attr = info["output_attribute"]
+        d_summary = _dataset_summary_for_llm(derived)
+        d_geom = _infer_geometry_kind_from_summary(d_summary)
+        raw_style = {
+            "target_attribute": attr,
+            "style_type": f"{_GEOM_PREFIX.get(d_geom, 'fill')}-categorical",
+            "color_theme": {"name": "category", "colors": _categorical_palette()},
+            "opacity": 0.85, "stroke_width": 1.0, "radius": 4.0,
+            "legend_title": attr.replace("_", " ").title(),
+            "notes": [f"{info['aggregate']} of {info.get('value_attribute') or 'features'} from {info['source_dataset']}"],
+        }
+        d_style = _normalize_style_for_client(dataset=derived, dataset_summary=d_summary, style=raw_style)
+        d_layer = {
+            "dataset": derived, "score": 1.0,
+            "reason": f"Spatially joined {info['target_dataset']} x {info['source_dataset']} ({info['aggregate']}).",
+            "geometry_kind": d_geom, "selected_attributes": [attr],
+            "style_intent": f"{info['aggregate']} {attr}", "style": d_style,
+        }
+        render_ms = _warm_tile_render_ms([derived])
+        fallback_msg = f"Joined {info['target_dataset']} with {info['source_dataset']} and colored by {attr.replace('_', ' ')}."
+        return {
+            "mode": "initial", "query": query,
+            "interaction_id": interaction_id,
+            "assistant_response": _normalize_unicode_text(assistant_response or fallback_msg),
+            "selection_mode": "derive",
+            "selected_dataset": derived, "selected_dataset_score": 1.0,
+            "selected_attributes": [attr], "style_intent": f"{info['aggregate']} {attr}",
+            "style": d_style, "layers": [d_layer], "derive": info,
+            "timings": {
+                "derive_ms": round(info.get("derive_seconds", 0.0) * 1000.0, 1),
+                "mvt_render_ms": render_ms,
+            },
+        }
+
+    def _run_chat_derive_job(
+        *, job_id: str, spec: Dict[str, Any], query: str,
+        interaction_id: str, assistant_response: str,
+    ) -> None:
+        """Background derive for a chat-style turn: run the (slow) join+tile, then
+        store the ready-to-render style payload on the job for the client to poll."""
+        try:
+            _set_build_job(job_id, status="running", step="joining",
+                           message="Combining datasets (spatial join + tiling)...")
+            info = _run_derive(spec)
+            payload = _build_derive_response(info, query, interaction_id, assistant_response)
+            _set_build_job(job_id, status="completed", step="done",
+                           message=f"Derived dataset '{info['dataset']}' is ready.",
+                           dataset=info["dataset"], result=payload)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[ChatDeriveJob] Failed for spec=%s", spec)
+            _set_build_job(job_id, status="failed", step="error", message=str(e))
+
     def get_tiler(dataset: str) -> VectorTiler:
         if dataset not in tiler_cache:
             tiler_cache[dataset] = VectorTiler(
@@ -1147,51 +1209,45 @@ def create_app(
                 max_layers=3,
                 provider_name=_LLM_PROVIDER,
             )
-            # Spatial-join / derived-attribute request: build a new dataset by
-            # combining two datasets, then style it by the derived attribute.
+            # Spatial-join / derived-attribute request: building+tiling a new
+            # dataset can take minutes for large targets, so run it as a
+            # background job (the client polls GET /api/upload-dataset/<job_id>)
+            # instead of blocking the request (which would exceed proxy/browser
+            # timeouts and return a non-JSON 504).
             if getattr(multi, "derive", None):
-                llm_ms = (perf_counter() - llm_t0) * 1000.0
-                info = _run_derive(multi.derive)
-                derived = info["dataset"]
-                attr = info["output_attribute"]
-                d_summary = _dataset_summary_for_llm(derived)
-                d_geom = _infer_geometry_kind_from_summary(d_summary)
-                raw_style = {
-                    "target_attribute": attr,
-                    "style_type": f"{_GEOM_PREFIX.get(d_geom, 'fill')}-categorical",
-                    "color_theme": {"name": "category", "colors": _categorical_palette()},
-                    "opacity": 0.85, "stroke_width": 1.0, "radius": 4.0,
-                    "legend_title": attr.replace("_", " ").title(),
-                    "notes": [f"{info['aggregate']} of {info.get('value_attribute') or 'features'} from {info['source_dataset']}"],
-                }
-                d_style = _normalize_style_for_client(dataset=derived, dataset_summary=d_summary, style=raw_style)
-                d_layer = {
-                    "dataset": derived, "score": 1.0,
-                    "reason": f"Spatially joined {info['target_dataset']} x {info['source_dataset']} ({info['aggregate']}).",
-                    "geometry_kind": d_geom, "selected_attributes": [attr],
-                    "style_intent": f"{info['aggregate']} {attr}", "style": d_style,
-                }
-                render_ms = _warm_tile_render_ms([derived])
-                total_ms = (perf_counter() - total_t0) * 1000.0
-                fallback_msg = f"Joined {info['target_dataset']} with {info['source_dataset']} and colored by {attr.replace('_', ' ')}."
-                return {
-                    "mode": "initial", "query": normalized_query,
-                    "interaction_id": _normalize_unicode_text(multi.interaction_id),
-                    "assistant_response": _normalize_unicode_text(multi.assistant_response or fallback_msg),
-                    "selection_mode": "derive",
-                    "selected_dataset": derived, "selected_dataset_score": 1.0,
-                    "selected_attributes": [attr], "style_intent": f"{info['aggregate']} {attr}",
-                    "style": d_style, "layers": [d_layer], "derive": info,
-                    "top_k": candidate_payload,
-                    "timings": {
-                        "semantic_search_ms": round(semantic_search_ms, 3),
-                        "llm_ms": round(llm_ms, 3),
-                        "derive_ms": round(info.get("derive_seconds", 0.0) * 1000.0, 1),
-                        "mvt_render_ms": render_ms,
-                        "total_ms": round(total_ms, 3),
-                        "last_tile_request_ms": None,
+                spec = dict(multi.derive)
+                interaction_id = _normalize_unicode_text(multi.interaction_id)
+                assistant_response = _normalize_unicode_text(multi.assistant_response or "")
+                derive_target = _normalize_unicode_text(str(spec.get("target_dataset", ""))).strip()
+                derive_source = _normalize_unicode_text(str(spec.get("source_dataset", ""))).strip()
+                job_id = uuid4().hex
+                _set_build_job(
+                    job_id, status="queued", step="queued",
+                    message="Combining datasets...", spec=spec,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+                Thread(
+                    target=_run_chat_derive_job,
+                    kwargs={
+                        "job_id": job_id, "spec": spec, "query": normalized_query,
+                        "interaction_id": interaction_id,
+                        "assistant_response": assistant_response,
                     },
-                }, 200
+                    daemon=True,
+                ).start()
+                pending_msg = assistant_response or (
+                    f"Combining {derive_target or 'the target'} with "
+                    f"{derive_source or 'the source'} — this can take a minute "
+                    "for large datasets…"
+                )
+                return {
+                    "mode": "deriving", "query": normalized_query,
+                    "interaction_id": interaction_id,
+                    "assistant_response": pending_msg,
+                    "selection_mode": "deriving",
+                    "derive_job_id": job_id, "derive": spec,
+                    "top_k": candidate_payload,
+                }, 202
             layers = _llm_overlay_layers(multi, candidate_by_name)
             if not layers:
                 raise ValueError("LLM returned no usable layers")

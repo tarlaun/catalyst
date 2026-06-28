@@ -1271,6 +1271,17 @@
                 k: 5
             });
 
+            // Cross-dataset "combine" requests build + tile a new dataset in the
+            // background; poll the job until it is ready, then render its style.
+            if (data && (data.selection_mode === "deriving" || data.derive_job_id)) {
+                if (data.interaction_id) state.interactionId = data.interaction_id;
+                state.lastAssistantResponse = data.assistant_response ||
+                    "Combining datasets… this can take a minute for large datasets.";
+                updateStatus();
+                await pollDeriveJob(data.derive_job_id);
+                return;
+            }
+
             syncFromResponse(data);
             applyStateToMap();
 
@@ -1285,6 +1296,41 @@
             els.styleBtn.disabled = false;
             els.styleBtn.textContent = "Suggest Style";
         }
+    }
+
+    async function pollDeriveJob(jobId) {
+        if (!jobId) throw new Error("No derive job id returned");
+        // Large targets can take minutes to join + tile; cap the wait at ~20 min.
+        for (let i = 0; i < 600; i++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            const resp = await fetch(CATALYST_BASE + `/api/upload-dataset/${jobId}`);
+            const job = await resp.json();
+            if (!resp.ok) {
+                throw new Error((job && job.error) || `Derive polling failed (${resp.status})`);
+            }
+            const status = job.status || "unknown";
+            if (status === "completed") {
+                if (job.result) {
+                    syncFromResponse(job.result);
+                    applyStateToMap();
+                    if (state.dataset) {
+                        await loadDatasetsCatalog(state.dataset);
+                        await inspectDataset(state.dataset);
+                    }
+                } else {
+                    state.lastAssistantResponse = "Derive completed but returned no style.";
+                    updateStatus();
+                }
+                return;
+            }
+            if (status === "failed") {
+                throw new Error(job.message || "Derive failed");
+            }
+            state.lastAssistantResponse =
+                `Combining datasets… (${job.step || status}) — large datasets can take a few minutes.`;
+            updateStatus();
+        }
+        throw new Error("Derive timed out after ~20 minutes");
     }
 
     async function generateMapCode() {
