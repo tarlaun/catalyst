@@ -93,7 +93,27 @@ let mapLoaded = false;
 // forbidden tokens (requestAnimationFrame / DOM / Popup live HERE, not there).
 // Every handle is tracked so it can be torn down on reset or before the next
 // generated script runs (no leaked animation loops or duplicate hover handlers).
-const _interactive = { rafs: new Set(), hovers: [], popups: new Set(), pulseLayers: new Set() };
+const _interactive = { rafs: new Set(), hovers: [], popups: new Set(), pulseLayers: new Set(), scriptListeners: [] };
+
+// The `map` handle handed to generated scripts. Identical surface to the real
+// map, except on()/once() registrations are recorded so re-running a script
+// replaces its listeners instead of stacking them (two stacked click-toggles
+// cancel out and read as "clicking does nothing").
+const scriptMap = new Proxy(map, {
+  get(target, prop) {
+    if (prop === "on" || prop === "once") {
+      return (ev, layerOrFn, maybeFn) => {
+        const r = target[prop](ev, layerOrFn, maybeFn);
+        if (typeof maybeFn === "function") _interactive.scriptListeners.push({ event: ev, layer: layerOrFn, fn: maybeFn });
+        else if (typeof layerOrFn === "function") _interactive.scriptListeners.push({ event: ev, layer: null, fn: layerOrFn });
+        return r;
+      };
+    }
+    const v = target[prop];
+    return typeof v === "function" ? v.bind(target) : v;
+  },
+  set(target, prop, value) { target[prop] = value; return true; },
+});
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -347,6 +367,8 @@ function clearInteractivity() {
   _interactive.rafs.clear();
   for (const h of _interactive.hovers) { try { map.off(h.event, h.layer, h.fn); } catch (e) {} }
   _interactive.hovers.length = 0;
+  for (const l of _interactive.scriptListeners) { try { l.layer ? map.off(l.event, l.layer, l.fn) : map.off(l.event, l.fn); } catch (e) {} }
+  _interactive.scriptListeners.length = 0;
   for (const p of _interactive.popups) { try { p.remove(); } catch (e) {} }
   _interactive.popups.clear();
   for (const lid of _interactive.pulseLayers) { try { if (map.getLayer(lid)) map.removeLayer(lid); } catch (e) {} }
@@ -366,6 +388,10 @@ function pruneInteractivity(dataset) {
   const dsPrefix = layerId(dataset, "");
   _interactive.hovers = _interactive.hovers.filter(h => {
     if (h.layer.indexOf(dsPrefix) === 0) { try { map.off(h.event, h.layer, h.fn); } catch (e) {} return false; }
+    return true;
+  });
+  _interactive.scriptListeners = _interactive.scriptListeners.filter(l => {
+    if (typeof l.layer === "string" && l.layer.indexOf(dsPrefix) === 0) { try { map.off(l.event, l.layer, l.fn); } catch (e) {} return false; }
     return true;
   });
 }
@@ -549,8 +575,9 @@ function runScript(script) {
   clearInteractivity();
   try {
     // Only api, map, maplibregl are in scope. Strict mode prevents implicit globals.
+    // `map` is the tracking wrapper so this run's listeners are torn down on the next run.
     const fn = new Function("api", "map", "maplibregl", '"use strict";\n' + src);
-    fn(api, map, maplibregl);
+    fn(api, scriptMap, maplibregl);
     logToParent("Generated script executed.");
   } catch (e) {
     errorToParent("Generated script error: " + (e && e.message ? e.message : e));
