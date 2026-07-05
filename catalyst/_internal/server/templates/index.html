@@ -686,6 +686,8 @@
                 <button id="applyStateBtn" class="secondary">Apply Current Style</button>
             </div>
 
+            <div id="runtimeLog" style="margin-top: 8px; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; max-height: 96px; overflow-y: auto; color: #9fd0a8;"></div>
+
             <div class="hint">
                 The script runs inside <code>map.html</code> with access to <code>api</code>, <code>map</code>, and
                 <code>maplibregl</code>.
@@ -1361,6 +1363,11 @@
         els.codeBtn.textContent = "Generating...";
 
         try {
+            // Snapshot any active cross-dataset join: generating code is a styling
+            // turn on the CURRENT layer, and the code-gen response carries no
+            // derive_live, so without this the join would be wiped from the map.
+            const prevDerive = state.deriveLive;
+
             const data = await postJSON("/api/generate-map-code", {
                 query,
                 interaction_id: state.interactionId,
@@ -1371,6 +1378,12 @@
             });
 
             syncFromResponse(data);
+
+            // Preserve the join if the code-gen turn stayed on the same dataset.
+            if (!data.derive_live && prevDerive &&
+                (data.selected_dataset === prevDerive.target || data.selected_dataset === state.dataset)) {
+                state.deriveLive = prevDerive;
+            }
 
             if (typeof data.generated_code === "string") {
                 els.codeBox.value = data.generated_code;
@@ -1398,9 +1411,16 @@
             return;
         }
 
+        // Run against the actually-rendered layer. For a cross-dataset join the
+        // active layer is the virtual "live__<target>__<attr>" id, not the base
+        // dataset — so api.pulse/hoverPopup/paint default to the right layer.
+        const runDataset = (state.deriveLive && state.deriveLive.target)
+            ? `live__${state.deriveLive.target}__${state.deriveLive.value_attribute}`
+            : (state.dataset || "");
+
         postToMap({
             type: "starlet:run-script",
-            payload: { script, dataset: state.dataset || "" }
+            payload: { script, dataset: runDataset }
         });
     }
 
@@ -1437,6 +1457,24 @@
         }
     });
 
+    // The runtime api surface this UI generates code against. Must match
+    // RUNTIME_API_LEVEL in map.html; the ready/pong handshake verifies it so a
+    // long-lived tab never runs new scripts against a stale cached iframe
+    // (where new api.* calls throw and generated code dies silently).
+    const REQUIRED_RUNTIME_API_LEVEL = 2;
+    let runtimeReloadAttempted = false;
+
+    const runtimeLogEl = document.getElementById("runtimeLog");
+    function showRuntimeLine(message, isError) {
+        if (!runtimeLogEl) return;
+        const line = document.createElement("div");
+        if (isError) line.style.color = "#ff8f8f";
+        line.textContent = (isError ? "⚠ " : "· ") + message;
+        runtimeLogEl.appendChild(line);
+        while (runtimeLogEl.childNodes.length > 6) runtimeLogEl.removeChild(runtimeLogEl.firstChild);
+        runtimeLogEl.scrollTop = runtimeLogEl.scrollHeight;
+    }
+
     window.addEventListener("message", (event) => {
         // Authenticate the sandboxed (null-origin) runtime by window identity
         // rather than origin string.
@@ -1444,6 +1482,18 @@
         const data = event.data || {};
 
         if (data.type === "starlet:runtime-ready" || data.type === "starlet:pong") {
+            const level = Number(data.payload?.apiLevel) || 0;
+            if (level < REQUIRED_RUNTIME_API_LEVEL) {
+                if (!runtimeReloadAttempted) {
+                    runtimeReloadAttempted = true;
+                    showRuntimeLine(`Map runtime is stale (api level ${level} < ${REQUIRED_RUNTIME_API_LEVEL}); reloading it…`, true);
+                    const sep = els.mapFrame.src.includes("?") ? "&" : "?";
+                    els.mapFrame.src = els.mapFrame.src + sep + "r=" + Date.now();
+                } else {
+                    showRuntimeLine("Map runtime is still stale after reload — hard-refresh this page (Cmd/Ctrl+Shift+R).", true);
+                }
+                return;
+            }
             mapFrameReady = true;
             if (state.dataset || state.currentStyle) {
                 applyStateToMap();
@@ -1453,11 +1503,13 @@
 
         if (data.type === "starlet:runtime-log" && data.payload?.message) {
             console.log("[map runtime]", data.payload.message);
+            showRuntimeLine(data.payload.message, false);
         }
 
         if (data.type === "starlet:runtime-error" && data.payload?.message) {
             state.lastAssistantResponse = `Map runtime error: ${data.payload.message}`;
             updateStatus();
+            showRuntimeLine(data.payload.message, true);
         }
     });
 
@@ -1479,12 +1531,15 @@
         if (loc.hostname === "localhost") host = "127.0.0.1";
         else if (loc.hostname === "127.0.0.1") host = "localhost";
         const port = loc.port ? ":" + loc.port : "";
+        // ?v= keys the browser cache to the api level, so deploying a new
+        // runtime always fetches fresh (the handshake above is the backstop).
+        const ver = "map.html?v=" + REQUIRED_RUNTIME_API_LEVEL;
         if (host) {
-            els.mapFrame.src = `${loc.protocol}//${host}${port}${CATALYST_BASE}/map.html`;
+            els.mapFrame.src = `${loc.protocol}//${host}${port}${CATALYST_BASE}/${ver}`;
         } else {
             // Unknown host: fall back to same-origin (map works; isolation weaker).
             console.warn("[catalyst] runtime served same-origin (no sibling host for cross-origin isolation)");
-            els.mapFrame.src = CATALYST_BASE + "/map.html";
+            els.mapFrame.src = CATALYST_BASE + "/" + ver;
         }
     })();
 

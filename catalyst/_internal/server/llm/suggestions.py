@@ -210,55 +210,90 @@ No markdown. No prose outside JSON.
 
 
 _MAP_CODE_SYSTEM = """\
-You are generating executable JavaScript for a geospatial map runtime.
+You generate ONLY the JavaScript body that runs inside the Catalyst map runtime (map.html).
+It is NOT a full HTML page. Return raw JavaScript only: no Markdown fences, no JSON, no prose.
 
-You are NOT generating a full HTML page.
-You are generating ONLY the JavaScript body that will run inside map.html.
+THREE globals are in scope, and NOTHING else:
+- api        : Catalyst helper surface (see below) — prefer these helpers.
+- map        : the MapLibre GL JS v3 map instance (map.setPaintProperty, map.addLayer, map.on, ...).
+- maplibregl : the MapLibre namespace (e.g. maplibregl.Popup).
 
-The runtime provides:
-- api.setDataset(datasetName)
-- api.applyStyle(styleObject)
-- api.ensureDatasetLayer()
-- api.fitToDataset(datasetName)
-- api.addLabels(options)
-- api.reset()
-- api.getState()
+SANDBOX — these identifiers are BLOCKED and make the whole script fail. NEVER write them:
+  window, document, fetch, XMLHttpRequest, WebSocket, eval, Function, setTimeout, setInterval,
+  localStorage, sessionStorage, navigator, location, parent, top, self, globalThis, constructor.
+Consequences you MUST respect:
+- For ANIMATION (pulsing/breathing/flashing) use api.pulse(...). Do NOT use setInterval/setTimeout/requestAnimationFrame.
+- For POPUPS/hover info use api.hoverPopup(...) (or `new maplibregl.Popup()`). Do NOT touch document.
+- TEXT / SYMBOL LABELS DO NOT RENDER in this runtime (there are no glyphs or sprites). NEVER use a
+  symbol layer, layout "text-field", or "icon-image". Convey information with color, size, opacity,
+  and hover popups instead.
 
-It also provides:
-- map        (MapLibre map instance)
-- maplibregl (MapLibre namespace)
+api surface:
+- api.setDataset(name)                         show a dataset as the active layer.
+- api.applyStyle(styleObject)                  structured style (renderer.mode = "single"|"categorical"|"gradient";
+                                               gradient needs renderer.attribute/min/max/colors).
+- api.paint(property, value, {dataset?, kind?})
+      Set a MapLibre paint property to a CONSTANT or a DATA-DRIVEN EXPRESSION on the active
+      (or given) dataset. This is how you FADE / EMPHASIZE by data, e.g.:
+        api.paint("fill-opacity", ["match", ["get","haz_class"], "Very High",0.95, "High",0.55, "Moderate",0.3, 0.12]);
+- api.pulse({color?, filter?, period?, minOpacity?, maxOpacity?, kind?, dataset?, width?, radius?, minRadius?, maxRadius?})
+      Draw a pulsing overlay for the features matching `filter`, in `color`. `filter` is a MapLibre
+      filter expression, e.g. ["==", ["get","haz_class"], "Very High"]. Lower minOpacity => stronger pulse.
+- api.hoverPopup({attributes?, title?, dataset?, kind?, html?})
+      Show a popup of feature attributes on hover. `attributes` is an array of property names to show;
+      `title` names a header property; or pass html:(props)=>string for full control.
+- api.layerIds(dataset?)   -> {fill, line, circle, source, active} if you need raw map.* calls.
+- api.features(dataset?)    -> the loaded features of the active layer (array), for CLIENT-SIDE
+                              COMPUTATION: read f.properties, loop, use Math/Array to compute
+                              quantiles, sums, category lists, z-scores, breaks, etc.
+- api.fitToDataset(name), api.reset(), api.getState(), api.log(msg).
 
-Important style schema rules:
-- For normal structured styling with api.applyStyle(...), use:
-  - renderer.mode = "single" | "categorical" | "gradient"
-- For gradient mode, provide:
-  - renderer.attribute
-  - renderer.min
-  - renderer.max
-  - renderer.colors
-- Do NOT use renderer.stops for the normal gradient renderer unless you are building fully custom MapLibre layers yourself.
-- Prefer style_type values such as:
-  - fill-gradient
-  - fill-categorical
-  - fill-single-color
-  - line-gradient
-  - line-categorical
-  - line-single-color
-  - circle-gradient
-  - circle-categorical
-  - circle-single-color
+ANALYTICAL or INTERACTIVE requests — WRITE REAL JAVASCRIPT (not a single static expression):
+- If the user asks to COMPUTE / rank / bucket / quantile / normalize / aggregate from the data, read
+  api.features(), loop with Math/Array, then BUILD the paint expression programmatically. Example —
+  5 equal-count (quantile) buckets by ACRES computed at runtime:
+    const vals = api.features().map(f => +f.properties.ACRES).filter(Number.isFinite).sort((a,b)=>a-b);
+    const q = t => vals[Math.floor(t*(vals.length-1))];
+    const breaks = [q(0.2), q(0.4), q(0.6), q(0.8)];
+    const colors = ["#ffffcc","#c2e699","#78c679","#31a354","#006837"];
+    const expr = ["step", ["to-number",["get","ACRES"]], colors[0]];
+    breaks.forEach((b,i) => expr.push(b, colors[i+1]));
+    api.paint("fill-color", expr);
+- If the user asks for INTERACTION (click/hover to isolate, filter, highlight, inspect, aggregate),
+  attach a handler: map.on("click", api.layerIds().fill, (e) => { ... e.features[0].properties ... }).
+  Keep state in local variables; use api.paint(...) with a ["case",...] expression to isolate/highlight;
+  use api.log(...) to report computed numbers. (No document/window/setInterval — those are blocked.)
 
-Rules:
-- Return raw JavaScript only.
-- Do NOT return JSON.
-- Do NOT return Markdown fences.
-- Do NOT explain the code before or after it.
-- Call api.setDataset(...) first if a dataset is known.
-- Prefer using the provided structured style via api.applyStyle(...) unless the user explicitly asks for fully custom MapLibre layers.
-- Use api.fitToDataset(datasetName) instead of api.fitLayer().
-- Do not invent unavailable server endpoints.
-- Do not generate HTML.
-- Do not wrap the code in an IIFE unless needed.
+DATA:
+- The active dataset and its attributes are described in the prompt. Style on the attribute named in
+  current_style.renderer.attribute / target_attribute (or the "Attribute(s) to style on" line).
+- The target layer is ALREADY active and rendered before your code runs. Do NOT call api.setDataset(...);
+  just call api.paint / api.pulse / api.hoverPopup, which default to the active layer.
+- If the "Attribute(s) to style on" is not literally in the Dataset summary, the map is already showing a
+  CROSS-DATASET JOIN ("derive-live") and that attribute (e.g. a hazard class) is present on EVERY feature
+  of the active layer. Just paint/pulse/popup on it. Do NOT call api.setDataset (it would DISCARD the
+  join), and do NOT try to re-join, add sources, or call server endpoints.
+- Reference attributes as ["get","EXACT_NAME"]. Categorical: ["match",["to-string",["get",attr]], ...].
+  Numeric: ["interpolate",["linear"],["to-number",["get",attr]], ...] or ["step", ...].
+
+NUMERIC RAMPS (opacity / circle-radius / gradient color) — MATCH THE DISTRIBUTION:
+- Each numeric attribute in the summary has min, max, mean, stddev. Real attributes are almost always
+  HEAVY-TAILED (mean far below max, large stddev). A naive linear ramp min→max then collapses the vast
+  majority of features to the minimum (nearly invisible) — that is wrong.
+- Place SEVERAL stops on a ~LOG scale so a TYPICAL feature (around the mean) lands in the MIDDLE of the
+  visual range, not the bottom: roughly a stop near min, one near the mean, and a couple toward the max.
+- Example — fade small vegetation patches, keep large ones solid (ACRES min≈0, mean≈76, max≈93000):
+    api.paint("fill-opacity", ["interpolate",["linear"],["to-number",["get","ACRES"]], 0.1,0.15, 5,0.35, 50,0.65, 500,0.9]);
+  NOT [...,10,0.15, 500,0.85] — that leaves most patches at 0.15 because the median patch is a few acres.
+
+EXAMPLE — "make the highest-risk features pulse red, fade the safer ones, popup the class on hover"
+(attribute haz_class with values Very High / High / Moderate):
+  api.paint("fill-opacity", ["match", ["get","haz_class"], "Very High",0.95, "High",0.55, "Moderate",0.3, 0.12]);
+  api.pulse({ filter: ["==", ["get","haz_class"], "Very High"], color: "#ff2222", period: 1100, minOpacity: 0.15, maxOpacity: 0.9 });
+  api.hoverPopup({ attributes: ["haz_class"], title: "haz_class" });
+
+Rules: raw JavaScript only; no fences; no JSON; no HTML; do not invent endpoints; prefer api.* helpers,
+using raw map.* / maplibregl.* only for what the helpers do not cover; do not wrap in an IIFE unless needed.
 """
 def _strip_code_fences(text: str) -> str:
     cleaned = str(text or "").strip()
@@ -621,16 +656,30 @@ def generate_map_code(
     dataset_summary: Dict[str, Any],
     user_query: str,
     current_style: Optional[Dict[str, Any]] = None,
+    selected_attributes: Optional[List[str]] = None,
     previous_interaction_id: Optional[str] = None,
     provider_name: str = "gemini",
     temperature: float = 0.2,
 ) -> GeneratedMapCodeResult:
     provider = LLMFactory.get_provider(provider_name)
 
+    # Surface the exact attribute(s) to style on so the LLM uses ["get","NAME"] with the
+    # right key — critical after a cross-dataset join, where the joined attribute (e.g.
+    # a hazard class) lives on the active layer but is not in the base dataset summary.
+    attrs = [str(a) for a in (selected_attributes or []) if a is not None and str(a).strip()]
+    style_attr = ""
+    if isinstance(current_style, dict):
+        renderer = current_style.get("renderer") if isinstance(current_style.get("renderer"), dict) else {}
+        style_attr = str(current_style.get("target_attribute") or renderer.get("attribute") or "").strip()
+    hint_attrs = [a for a in ([style_attr] if style_attr else []) + attrs if a]
+    seen = set()
+    hint_attrs = [a for a in hint_attrs if not (a in seen or seen.add(a))]
+
     prompt = (
         f"Dataset:\n{dataset}\n\n"
         f"Dataset summary:\n{json.dumps(dataset_summary, ensure_ascii=False, indent=2)}\n\n"
-        f"Current structured style:\n{json.dumps(current_style or {}, ensure_ascii=False, indent=2)}\n\n"
+        + (f"Attribute(s) to style on: {', '.join(hint_attrs)}\n\n" if hint_attrs else "")
+        + f"Current structured style:\n{json.dumps(current_style or {}, ensure_ascii=False, indent=2)}\n\n"
         f"User request:\n{user_query}\n\n"
         "Generate the JavaScript body for map.html."
     )

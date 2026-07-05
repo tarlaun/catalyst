@@ -852,6 +852,11 @@ def create_app(
                 entry["role"] = "numeric"
                 entry["min"] = stats_obj.get("min")
                 entry["max"] = stats_obj.get("max")
+                # mean/stddev let the LLM see skew (mean << max => heavy-tailed), so it
+                # can place log-spaced opacity/size/gradient stops instead of a naive
+                # linear min→max ramp that collapses most features to the minimum.
+                entry["mean"] = stats_obj.get("mean")
+                entry["stddev"] = stats_obj.get("stddev")
                 entry["top_k"] = stats_obj.get("top_k") or []
             elif stats_obj.get("top_k") is not None:
                 entry["role"] = "categorical"
@@ -1845,6 +1850,16 @@ def create_app(
         logger.info("Serving map runtime page")
         return render_template("map.html", base_path=_BASE_PATH)
 
+    @app.after_request
+    def _no_stale_html(resp):
+        # The demo UI and the iframe map runtime evolve together; a browser that
+        # keeps a cached copy of either runs generated scripts against an old
+        # api surface and fails silently. Force revalidation for HTML only
+        # (tiles/data keep their own caching behavior).
+        if resp.mimetype == "text/html":
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
     @app.route("/<path:filename>")
     def serve_file(filename):
         normalized = filename.strip("/")
@@ -2109,6 +2124,7 @@ def create_app(
                     dataset_summary=dataset_summary,
                     user_query=user_query,
                     current_style=current_style,
+                    selected_attributes=current_attributes,
                     previous_interaction_id=None,
                     provider_name=_LLM_PROVIDER,
                     temperature=0.2,
@@ -2155,6 +2171,7 @@ def create_app(
                 dataset_summary=dataset_summary,
                 user_query=user_query,
                 current_style=current_style,
+                selected_attributes=current_attributes,
                 previous_interaction_id=None,
                 provider_name=_LLM_PROVIDER,
                 temperature=0.2,

@@ -55,6 +55,11 @@ const CATALYST_BASE = window.location.pathname.replace(/\/map\.html?$/i, "");
 // ----------------------------------------------------------------------------
 // Peer messaging (parent <-> runtime)
 // ----------------------------------------------------------------------------
+// Bumped whenever the `api` surface offered to generated scripts changes. The
+// parent checks this in the ready/pong handshake and force-reloads a stale
+// runtime (a long-lived tab otherwise keeps executing an old iframe where new
+// api.* calls throw and every generated script dies).
+const RUNTIME_API_LEVEL = 2;
 function postToParent(type, payload) {
   try { window.parent.postMessage({ type, payload: payload || {} }, "*"); } catch (e) {}
 }
@@ -82,6 +87,13 @@ map.addControl(new maplibregl.NavigationControl(), "top-right");
 const layers = new Map();
 let activeDataset = "";
 let mapLoaded = false;
+
+// Interactivity primitives (trusted host code). Generated scripts reach these
+// only through `api.*`, so the sandboxed script never itself contains the
+// forbidden tokens (requestAnimationFrame / DOM / Popup live HERE, not there).
+// Every handle is tracked so it can be torn down on reset or before the next
+// generated script runs (no leaked animation loops or duplicate hover handlers).
+const _interactive = { rafs: new Set(), hovers: [], popups: new Set(), pulseLayers: new Set() };
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -183,17 +195,30 @@ function ensureLayer(dataset, style) {
   }
 }
 
+// Which render kind (fill/line/circle) actually represents a dataset's geometry,
+// used to pick the layer to pulse/hover. Derived from the style_type prefix.
+function kindFromStyle(style) {
+  const p = String((style && style.style_type) || "").split("-")[0];
+  if (p === "line" || p === "circle" || p === "fill") return p;
+  const g = String((style && style.geometry_kind) || "").toLowerCase();
+  if (g.includes("line")) return "line";
+  if (g.includes("point")) return "circle";
+  return "fill";
+}
+
 function applyStyleToDataset(dataset, style) {
   if (!dataset) return;
   ensureLayer(dataset, style);
   const entry = layers.get(dataset) || {};
   entry.style = style;
+  entry.kind = kindFromStyle(style);
   entry.label = (style && (style.legend_title || style.target_attribute)) || dataset;
   layers.set(dataset, entry);
   renderLegend();
 }
 
 function removeDataset(dataset) {
+  pruneInteractivity(dataset);
   for (const kind of ["fill", "line", "circle"]) {
     const lid = layerId(dataset, kind);
     if (map.getLayer(lid)) map.removeLayer(lid);
@@ -204,6 +229,7 @@ function removeDataset(dataset) {
 }
 
 function removeAll() {
+  clearInteractivity();
   for (const dataset of Array.from(layers.keys())) removeDataset(dataset);
   activeDataset = "";
   renderLegend();
@@ -313,16 +339,184 @@ async function setLayers(specs) {
 }
 
 // ----------------------------------------------------------------------------
+// Interactivity helpers (trusted). Used by api.pulse / api.hoverPopup / api.paint.
+// ----------------------------------------------------------------------------
+function clearInteractivity() {
+  _interactive.runGen = (_interactive.runGen || 0) + 1;   // invalidates deferred rebinds from the previous run
+  for (const c of _interactive.rafs) { c.alive = false; try { cancelAnimationFrame(c.id); } catch (e) {} }
+  _interactive.rafs.clear();
+  for (const h of _interactive.hovers) { try { map.off(h.event, h.layer, h.fn); } catch (e) {} }
+  _interactive.hovers.length = 0;
+  for (const p of _interactive.popups) { try { p.remove(); } catch (e) {} }
+  _interactive.popups.clear();
+  for (const lid of _interactive.pulseLayers) { try { if (map.getLayer(lid)) map.removeLayer(lid); } catch (e) {} }
+  _interactive.pulseLayers.clear();
+  try { map.getCanvas().style.cursor = ""; } catch (e) {}
+}
+
+// Tear down interactivity attached to one dataset (called when its layer is removed).
+function pruneInteractivity(dataset) {
+  const pulsePre = "pulse__" + dataset.replace(/[^a-zA-Z0-9_]/g, "_") + "__";
+  for (const lid of Array.from(_interactive.pulseLayers)) {
+    if (lid.indexOf(pulsePre) === 0) {
+      try { if (map.getLayer(lid)) map.removeLayer(lid); } catch (e) {}
+      _interactive.pulseLayers.delete(lid);
+    }
+  }
+  const dsPrefix = layerId(dataset, "");
+  _interactive.hovers = _interactive.hovers.filter(h => {
+    if (h.layer.indexOf(dsPrefix) === 0) { try { map.off(h.event, h.layer, h.fn); } catch (e) {} return false; }
+    return true;
+  });
+}
+
+// requestAnimationFrame loop with a lifecycle handle we can cancel.
+function startAnim(step) {
+  const ctrl = { alive: true, id: 0 };
+  const loop = (ts) => { if (!ctrl.alive) return; try { step(ts); } catch (e) {} ctrl.id = requestAnimationFrame(loop); };
+  ctrl.id = requestAnimationFrame(loop);
+  _interactive.rafs.add(ctrl);
+  return ctrl;
+}
+
+function datasetKind(dataset) { const e = layers.get(dataset); return (e && e.kind) || "fill"; }
+function existingLayerKinds(dataset) { return ["fill", "line", "circle"].filter(k => map.getLayer(layerId(dataset, k))); }
+
+// ----------------------------------------------------------------------------
 // API surface exposed to LLM-generated scripts
 // ----------------------------------------------------------------------------
 const api = {
-  setDataset(dataset) { if (!dataset) return; activeDataset = dataset; setLayers([{ dataset, style: layers.get(dataset) ? layers.get(dataset).style : undefined }]); },
+  setDataset(dataset) {
+    if (!dataset) return;
+    // Guard an active cross-dataset join: if the joined ("live__<ds>__…") layer is
+    // showing, a generated script that calls setDataset(baseDataset) must NOT tear it
+    // down (that would drop the joined attribute). Keep the join and stay on it.
+    const vpfx = "live__" + String(dataset).replace(/[^a-zA-Z0-9_]/g, "_") + "__";
+    if (activeDataset && activeDataset.indexOf(vpfx) === 0) return;
+    activeDataset = dataset;
+    setLayers([{ dataset, style: layers.get(dataset) ? layers.get(dataset).style : undefined }]);
+  },
   applyStyle(style) { const ds = (style && style.dataset) || activeDataset; applyStyleToDataset(ds, style); },
   setLayers(specs) { return setLayers(specs); },
   addLayer(dataset, style) { applyStyleToDataset(dataset, style || defaultStyleFor("unknown")); if (dataset) { activeDataset = dataset; renderLegend(); } },
   ensureDatasetLayer() { if (activeDataset) ensureLayer(activeDataset, layers.get(activeDataset) ? layers.get(activeDataset).style : undefined); },
   fitToDataset(dataset) { return fitToDatasets([dataset || activeDataset].filter(Boolean)); },
   fitToLayers() { return fitToDatasets(Array.from(layers.keys())); },
+  layerIds(dataset) { const ds = dataset || activeDataset; return { fill: layerId(ds, "fill"), line: layerId(ds, "line"), circle: layerId(ds, "circle"), source: sourceId(ds), active: ds }; },
+  // The loaded features of the active (or given) layer, for client-side computation
+  // (quantiles, sums, category lists, ...). Returns features in the currently loaded
+  // tiles (near the viewport); may contain a few tile-boundary duplicates.
+  features(dataset) {
+    const ds = dataset || activeDataset;
+    if (!ds) return [];
+    const sid = sourceId(ds);
+    if (!map.getSource(sid)) return [];
+    try { return map.querySourceFeatures(sid, { sourceLayer: "layer0" }); } catch (e) { return []; }
+  },
+  // Set any MapLibre paint property to a CONSTANT or a DATA-DRIVEN EXPRESSION,
+  // e.g. api.paint("fill-opacity", ["match",["get","haz_class"],"Very High",0.95,"High",0.5,0.12]).
+  paint(property, value, opts) {
+    const o = opts || {};
+    const ds = o.dataset || activeDataset;
+    if (!ds || !property) return;
+    const kinds = o.kind ? [o.kind] : existingLayerKinds(ds);
+    for (const k of kinds) {
+      const lid = layerId(ds, k);
+      if (map.getLayer(lid)) { try { map.setPaintProperty(lid, property, value); } catch (e) { /* prop/kind mismatch */ } }
+    }
+    // Polygons render as a fill PLUS a separate outline (line) layer. Fading only the
+    // fill leaves bright full-opacity outlines that mask the effect, so mirror
+    // fill-opacity onto the outline — small/faded polygons then actually recede.
+    if (property === "fill-opacity" && !o.kind) {
+      const lid = layerId(ds, "line");
+      if (map.getLayer(lid)) { try { map.setPaintProperty(lid, "line-opacity", value); } catch (e) {} }
+    }
+  },
+  // Draw a pulsing (breathing) overlay for features matching `filter`, in `color`.
+  // opts: {color?, filter?, period?, minOpacity?, maxOpacity?, kind?, dataset?, width?, radius?, minRadius?, maxRadius?}
+  pulse(opts) {
+    const o = opts || {};
+    const ds = o.dataset || activeDataset;
+    if (!ds) return null;
+    const sid = sourceId(ds);
+    if (!map.getSource(sid)) { logToParent("pulse: no source for " + ds); return null; }
+    const kind = o.kind || datasetKind(ds);
+    const type = kind === "line" ? "line" : kind === "circle" ? "circle" : "fill";
+    const period = Number.isFinite(+o.period) ? +o.period : 1200;
+    const minOpacity = Number.isFinite(+o.minOpacity) ? +o.minOpacity : 0.2;
+    const maxOpacity = Number.isFinite(+o.maxOpacity) ? +o.maxOpacity : 0.9;
+    const color = o.color || "#ff2222";
+    let n = 0;
+    while (map.getLayer("pulse__" + ds.replace(/[^a-zA-Z0-9_]/g, "_") + "__" + n)) n++;
+    const lid = "pulse__" + ds.replace(/[^a-zA-Z0-9_]/g, "_") + "__" + n;
+    const paint = type === "fill"
+      ? { "fill-color": color, "fill-opacity": maxOpacity, "fill-outline-color": color }
+      : type === "line"
+      ? { "line-color": color, "line-width": Number.isFinite(+o.width) ? +o.width : 3, "line-opacity": maxOpacity }
+      : { "circle-color": color, "circle-radius": Number.isFinite(+o.radius) ? +o.radius : 7, "circle-opacity": maxOpacity, "circle-stroke-color": color, "circle-stroke-width": 1 };
+    const def = { id: lid, type, source: sid, "source-layer": "layer0", paint };
+    if (o.filter) def.filter = o.filter;
+    try { map.addLayer(def); } catch (e) { logToParent("pulse: " + (e && e.message)); return null; }
+    _interactive.pulseLayers.add(lid);
+    const opacityProp = type === "line" ? "line-opacity" : type === "circle" ? "circle-opacity" : "fill-opacity";
+    const rmin = Number.isFinite(+o.minRadius) ? +o.minRadius : null;
+    const rmax = Number.isFinite(+o.maxRadius) ? +o.maxRadius : null;
+    startAnim((ts) => {
+      const phase = 0.5 - 0.5 * Math.cos((ts % period) / period * 2 * Math.PI);
+      if (!map.getLayer(lid)) return;
+      map.setPaintProperty(lid, opacityProp, minOpacity + (maxOpacity - minOpacity) * phase);
+      if (type === "circle" && rmin != null && rmax != null) {
+        map.setPaintProperty(lid, "circle-radius", rmin + (rmax - rmin) * phase);
+      }
+    });
+    return lid;
+  },
+  // Show a popup of feature attributes on hover over a dataset's layer(s).
+  // opts: {attributes?:[names], title?:name, dataset?, kind?, html?:(props)=>string}
+  hoverPopup(opts) {
+    const o = opts || {};
+    const ds = o.dataset || activeDataset;
+    if (!ds) return;
+    let kinds = o.kind ? [o.kind] : existingLayerKinds(ds);
+    if (!kinds.length) {
+      // The dataset's layers are added asynchronously (metadata fetch first), so a
+      // script that runs right after a dataset switch can land here. Rebind once
+      // the map settles rather than silently never showing a popup.
+      logToParent("hoverPopup: layers for " + ds + " not ready yet; will bind when the map is idle");
+      const gen = _interactive.runGen || 0;
+      map.once("idle", () => {
+        if ((_interactive.runGen || 0) !== gen) return;   // a newer run replaced this script
+        if (o.kind || existingLayerKinds(ds).length) api.hoverPopup(o);
+        else errorToParent("hoverPopup: no layer for " + ds + " (hover popups are not active)");
+      });
+      return;
+    }
+    const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "260px" });
+    _interactive.popups.add(popup);
+    const attrs = Array.isArray(o.attributes) ? o.attributes : null;
+    const buildHtml = (props) => {
+      props = props || {};
+      if (typeof o.html === "function") { try { return String(o.html(props)); } catch (e) { return ""; } }
+      const keys = attrs || Object.keys(props);
+      const rows = keys.map(k => `<div style="display:flex;gap:10px;justify-content:space-between"><span style="opacity:.65">${escHtml(k)}</span><b>${escHtml(props[k])}</b></div>`).join("");
+      const title = (o.title && props[o.title] != null) ? `<div style="font-weight:600;margin-bottom:4px">${escHtml(props[o.title])}</div>` : "";
+      return `<div style="font:12px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">${title}${rows}</div>`;
+    };
+    for (const k of kinds) {
+      const lid = layerId(ds, k);
+      if (!map.getLayer(lid)) continue;
+      const moveFn = (e) => {
+        map.getCanvas().style.cursor = "pointer";
+        const f = e.features && e.features[0];
+        if (f) popup.setLngLat(e.lngLat).setHTML(buildHtml(f.properties)).addTo(map);
+      };
+      const leaveFn = () => { map.getCanvas().style.cursor = ""; popup.remove(); };
+      map.on("mousemove", lid, moveFn);
+      map.on("mouseleave", lid, leaveFn);
+      _interactive.hovers.push({ event: "mousemove", layer: lid, fn: moveFn });
+      _interactive.hovers.push({ event: "mouseleave", layer: lid, fn: leaveFn });
+    }
+  },
   addLabels(options) { logToParent("addLabels is a no-op in this runtime build: " + JSON.stringify(options || {})); },
   reset() { removeAll(); },
   log(msg) { logToParent(msg); },
@@ -335,7 +529,11 @@ const api = {
 // Identifiers that would let a script escape the runtime sandbox or reach the
 // network / DOM / storage. Rejected before execution (defense-in-depth on top
 // of the iframe sandbox attribute and the limited argument surface).
-const FORBIDDEN = /\b(document|window|parent|top|self|globalThis|frames|opener|fetch|XMLHttpRequest|WebSocket|EventSource|importScripts|localStorage|sessionStorage|indexedDB|cookie|navigator|location|eval|Function|setTimeout|setInterval|require|module|process|__proto__|constructor)\b/;
+// Boundaries exclude '-' (not just \w) so legitimate hyphenated CSS/identifiers in
+// generated code — padding-top, margin-top, border-top, align-self, top-right — do
+// NOT false-positive, while bare or member-access globals (top, window.document,
+// self.eval, parent.location, a.constructor) are still blocked.
+const FORBIDDEN = /(?<![\w-])(document|window|parent|top|self|globalThis|frames|opener|fetch|XMLHttpRequest|WebSocket|EventSource|importScripts|localStorage|sessionStorage|indexedDB|cookie|navigator|location|eval|Function|setTimeout|setInterval|require|module|process|__proto__|constructor)(?![\w-])/;
 
 function runScript(script) {
   const src = String(script || "");
@@ -346,6 +544,9 @@ function runScript(script) {
       "Only the provided api/map/maplibregl surface may be used.");
     return;
   }
+  // Tear down interactivity from any previous run so re-running replaces cleanly
+  // (no leaked animation loops or duplicate hover handlers).
+  clearInteractivity();
   try {
     // Only api, map, maplibregl are in scope. Strict mode prevents implicit globals.
     const fn = new Function("api", "map", "maplibregl", '"use strict";\n' + src);
@@ -367,7 +568,7 @@ window.addEventListener("message", (event) => {
 
   switch (type) {
     case "starlet:ping":
-      postToParent("starlet:pong", {});
+      postToParent("starlet:pong", { apiLevel: RUNTIME_API_LEVEL });
       break;
     case "starlet:reset":
       removeAll();
@@ -392,7 +593,7 @@ window.addEventListener("message", (event) => {
 
 map.on("load", () => {
   mapLoaded = true;
-  postToParent("starlet:runtime-ready", {});
+  postToParent("starlet:runtime-ready", { apiLevel: RUNTIME_API_LEVEL });
 });
 </script>
 </body>
