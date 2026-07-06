@@ -1249,6 +1249,17 @@ def create_app(
                 logger.exception("[Overlay] tile warm failed for %s", dataset)
         return round(worst, 3) if worst is not None else None
 
+    # Follow-up pivot detection is decided against the live semantic index, not a
+    # keyword list (the previous hardcoded triggers were written for a counties/
+    # roads catalogue and never matched this demo's domains, so a follow-up could
+    # never switch datasets without a page refresh). Calibrated on the deployed
+    # gemini-embedding-001 catalogue: prompts that target a dataset score >= .68
+    # for it, while pure styling refinements ("make it red", "use a log scale")
+    # top out ~.59 — so a challenger dataset must clear an absolute floor AND
+    # beat the current dataset by a margin before we abandon the conversation.
+    _PIVOT_CHALLENGER_MIN = float(os.environ.get("CATALYST_PIVOT_CHALLENGER_MIN", "0.62"))
+    _PIVOT_MARGIN = float(os.environ.get("CATALYST_PIVOT_MARGIN", "0.03"))
+
     def _looks_like_new_dataset_request(
         user_query: str,
         current_dataset: Optional[str],
@@ -1273,20 +1284,33 @@ def create_app(
         if current_dataset and current_dataset.lower() in q:
             return False
 
-        domain_triggers = [
-            "county", "counties", "state", "states", "tract", "tracts",
-            "road", "roads", "rail", "rails", "building", "buildings",
-            "point", "points", "landmark", "landmarks",
-        ]
-        if any(word in q for word in domain_triggers):
-            target_attr = ""
-            if current_style:
-                target_attr = str(current_style.get("target_attribute", "")).lower()
-            current_dataset_lc = (current_dataset or "").lower()
-            if current_dataset_lc and current_dataset_lc not in q and target_attr and target_attr not in q:
-                return True
+        # Naming the attribute currently being styled is a refinement.
+        if current_style:
+            target_attr = str(current_style.get("target_attribute", "")).lower()
+            if target_attr and target_attr in q:
+                return False
 
-        return False
+        try:
+            router = _get_catalog_router()
+            results = router.search(q, k=10)
+        except Exception:
+            logger.warning(
+                "[ChatStyle] pivot check: semantic search failed; staying on current dataset",
+                exc_info=True,
+            )
+            return False
+        if not results:
+            return False
+
+        scores = {r.dataset: r.score for r in results}
+        top = results[0]
+        if top.dataset == current_dataset:
+            return False
+        current_score = scores.get(current_dataset)
+        if current_score is None:
+            # Current dataset didn't even make top-k: weaker than everything returned.
+            current_score = min(scores.values())
+        return top.score >= _PIVOT_CHALLENGER_MIN and (top.score - current_score) >= _PIVOT_MARGIN
 
     def _run_initial_chat_turn(user_query: str, k: int = 5) -> Tuple[Dict[str, Any], int]:
         total_t0 = perf_counter()
@@ -2093,6 +2117,19 @@ def create_app(
             k = max(1, min(int(requested_k), 10))
         except Exception:
             k = 5
+
+        # Same pivot rule as chat-style: if the prompt clearly targets a different
+        # dataset than the ongoing conversation, re-route instead of generating
+        # code against the stale one.
+        if current_dataset and _looks_like_new_dataset_request(
+            user_query=user_query,
+            current_dataset=current_dataset,
+            current_style=current_style,
+        ):
+            current_dataset = ""
+            interaction_id = ""
+            current_style = {}
+            current_attributes = []
 
         try:
             total_t0 = perf_counter()

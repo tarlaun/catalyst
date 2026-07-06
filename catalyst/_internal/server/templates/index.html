@@ -519,20 +519,19 @@
             <label for="promptExamples">Try an example</label>
             <select id="promptExamples">
                 <option value="">Choose an example prompt…</option>
-                <optgroup label="Single dataset — Suggest Style">
-                    <option>Color Riverside based on vegetation type.</option>
-                    <option>Color the fire hazard severity zones from moderate to very high risk.</option>
-                    <option>Show Riverside parks with a color gradient by acreage.</option>
-                    <option>Color Riverside highways by highway type.</option>
+                <optgroup label="Style one dataset — use “Suggest Style”">
+                    <option>Color the Riverside vegetation map by vegetation type, one distinct color per type.</option>
+                    <option>Show the fire hazard severity zones, colored from moderate to very high risk.</option>
+                    <option>Color Riverside highways by their highway type (interstate, ramp, US highway).</option>
                 </optgroup>
-                <optgroup label="Cross-dataset — Suggest Style">
-                    <option>Color the buildings by the fire hazard zone they fall in.</option>
-                    <option>Visualize parks, highways and intersections in Riverside on one map.</option>
+                <optgroup label="Combine datasets — use “Suggest Style”">
+                    <option>Visualize parks, highways and intersections in Riverside together on one map.</option>
                 </optgroup>
-                <optgroup label="Interactive — Generate Map Code">
-                    <option>Highlight Riverside's vegetation patterns by coloring each vegetation type differently and using opacity to make large areas stand out while fading small patches.</option>
-                    <option>Allow me to click on a vegetation area, fade out all other polygons, and show a popup with its vegetation type and acreage.</option>
-                    <option>Classify vegetation patches into five acreage quantile classes computed from the data on screen.</option>
+                <optgroup label="Interactive maps — use “Generate Map Code”, then “Run in Map”">
+                    <option>Color each vegetation type differently and use opacity so large areas stand out while small patches fade (log scale on acreage).</option>
+                    <option>Let me click a vegetation area to fade out all other polygons and show a popup with its vegetation type and acreage.</option>
+                    <option>Classify vegetation patches into five acreage quantile classes computed from the features on screen.</option>
+                    <option>Color Riverside parks by acreage on a logarithmic scale so the few huge parks don't wash out the map.</option>
                 </optgroup>
             </select>
 
@@ -570,6 +569,11 @@
             </div>
 
             <div id="runtimeLog" style="margin-top: 8px; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; max-height: 96px; overflow-y: auto; color: #9fd0a8;"></div>
+
+            <div class="hint">
+                “Generate Map Code” styles the map right away, but the generated behavior
+                (interactivity, custom logic) only takes effect after you press <strong>Run in Map</strong>.
+            </div>
         </section>
 
         <section class="card">
@@ -1164,6 +1168,12 @@
             state.layers = Array.from(byName.values());
         } else if (incomingLayers.length) {
             state.layers = incomingLayers;
+        } else if (state.dataset && Array.isArray(state.layers) && state.layers.length &&
+                   !state.layers.some(l => l.dataset === state.dataset)) {
+            // The turn switched datasets but carried no layer stack (e.g. code
+            // generation): the preserved overlay belongs to the previous dataset,
+            // so drop it — otherwise applyStateToMap keeps rendering the old one.
+            state.layers = [];
         }
 
         if (state.dataset) {
@@ -1436,6 +1446,7 @@
 
             if (typeof data.generated_code === "string") {
                 els.codeBox.value = data.generated_code;
+                showRuntimeLine("Code generated — press “Run in Map” to activate it.", false);
             }
 
             applyStateToMap();
@@ -1490,6 +1501,16 @@
     if (promptExamples) promptExamples.addEventListener("change", () => {
         if (!promptExamples.value) return;
         els.promptBox.value = promptExamples.value;
+        // Each example is a fresh starting point: drop the ongoing conversation AND
+        // the current dataset/join so the next turn (style or code) routes through
+        // semantic search instead of targeting the previously selected dataset.
+        state.interactionId = "";
+        state.dataset = "";
+        state.selectedAttributes = [];
+        state.currentStyle = null;
+        state.deriveLive = null;
+        state.layers = [];
+        updateStatus();
         els.promptBox.focus();
     });
 
