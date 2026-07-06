@@ -1840,10 +1840,16 @@ def create_app(
         except Exception as e:
             return {"error": f"Internal error: {e}"}, 500
 
+    def _uploads_enabled() -> bool:
+        # Upload+build runs an unauthenticated, unbounded tiling job on visitor
+        # files and reindexes the shared catalogue — set CATALYST_ALLOW_UPLOADS=0
+        # on public deployments to remove the UI section and 403 the endpoint.
+        return os.environ.get("CATALYST_ALLOW_UPLOADS", "1").strip().lower() not in {"0", "false", "no", "off"}
+
     @app.get("/")
     def index():
         logger.info("Serving index page")
-        return render_template("index.html", base_path=_BASE_PATH)
+        return render_template("index.html", base_path=_BASE_PATH, allow_uploads=_uploads_enabled())
 
     @app.get("/map.html")
     def map_page():
@@ -1945,6 +1951,8 @@ def create_app(
 
     @app.post("/api/upload-dataset")
     def upload_dataset_and_build():
+        if not _uploads_enabled():
+            return _json_response({"error": "Dataset uploads are disabled on this deployment."}, 403)
         try:
             uploaded = request.files.get("file")
             if uploaded is None or not uploaded.filename:

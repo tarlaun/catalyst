@@ -461,6 +461,38 @@
             backdrop-filter: blur(8px);
         }
 
+        details.card > summary {
+            cursor: pointer;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            user-select: none;
+        }
+
+        details.card > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        details.card > summary::before {
+            content: "▸";
+            color: var(--muted);
+            font-size: 12px;
+            transition: transform 0.15s ease;
+        }
+
+        details.card[open] > summary::before {
+            transform: rotate(90deg);
+        }
+
+        details.card > summary .section-title {
+            margin: 0;
+        }
+
+        details.card > summary + * {
+            margin-top: 12px;
+        }
+
         @media (max-width: 1200px) {
             .app {
                 grid-template-columns: 1fr;
@@ -484,99 +516,23 @@
         </section>
 
         <section class="card">
-            <h2 class="section-title">Dataset Explorer</h2>
-
-            <div class="row">
-                <div>
-                    <label for="datasetSelect">Available datasets</label>
-                    <select id="datasetSelect">
-                        <option value="">Loading datasets...</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="row" style="margin-top:10px;">
-                <button id="refreshDatasetsBtn" class="secondary">Refresh Datasets</button>
-                <button id="inspectDatasetBtn" class="secondary">Inspect Selected Dataset</button>
-            </div>
-        </section>
-
-        <section class="card">
-            <h2 class="section-title">Upload + Build Dataset</h2>
-            <p class="subtitle" style="margin-bottom:12px;">
-                Upload a dataset file, generate Catalyst tiles/MVTs, then rebuild the catalogue index.
-            </p>
-
-            <label for="uploadFile">Dataset file</label>
-            <input id="uploadFile" type="file"/>
-
-            <div class="row" style="margin-top:10px;">
-                <div>
-                    <label for="uploadDatasetName">Dataset name</label>
-                    <input id="uploadDatasetName" type="text" placeholder="Example: TIGER2018_COUNTY"/>
-                </div>
-            </div>
-
-            <div class="row" style="margin-top:10px;">
-                <div>
-                    <label for="uploadZoom">Zoom</label>
-                    <input id="uploadZoom" type="number" value="7" min="0"/>
-                </div>
-                <div>
-                    <label for="uploadThreshold">Threshold</label>
-                    <input id="uploadThreshold" type="number" value="0" min="0"/>
-                </div>
-            </div>
-
-            <div class="row" style="margin-top:10px;">
-                <div>
-                    <label for="pgHost">PG host</label>
-                    <input id="pgHost" type="text" value="localhost"/>
-                </div>
-                <div>
-                    <label for="pgPort">PG port</label>
-                    <input id="pgPort" type="number" value="5432"/>
-                </div>
-            </div>
-
-            <div class="row" style="margin-top:10px;">
-                <div>
-                    <label for="pgDb">PG database</label>
-                    <input id="pgDb" type="text" value="postgres"/>
-                </div>
-                <div>
-                    <label for="pgUser">PG user</label>
-                    <input id="pgUser" type="text" value="tarlan"/>
-                </div>
-            </div>
-
-            <div class="row" style="margin-top:10px;">
-                <button id="uploadBuildBtn" class="warning">Upload + Build</button>
-            </div>
-
-            <div class="hint" id="uploadStatusBox" style="margin-top:10px;">
-                No upload job yet.
-            </div>
-        </section>
-
-        <section class="card">
             <label for="promptBox">Prompt</label>
-            <textarea id="promptBox" placeholder="Example: Show counties with AWATER as a blue gradient and a dark outline."></textarea>
+            <textarea id="promptBox" placeholder="Example: Color Riverside by vegetation type."></textarea>
 
             <div class="row" style="margin-top: 10px;">
                 <button id="styleBtn">Suggest Style</button>
                 <button id="codeBtn" class="secondary">Generate Map Code</button>
             </div>
 
-            <div class="hint">
-                “Suggest Style” uses the structured style flow. “Generate Map Code” asks the LLM to write full JS for
-                the map runtime.
+            <div class="status-grid" style="margin-top: 10px;">
+                <div class="pill">Dataset: <strong id="datasetLabel">None</strong></div>
+                <div class="pill">Interaction: <strong id="interactionLabel">None</strong></div>
             </div>
-        </section>
 
-        <section class="card status-grid">
-            <div class="pill">Dataset: <strong id="datasetLabel">None</strong></div>
-            <div class="pill">Interaction: <strong id="interactionLabel">None</strong></div>
+            <div class="hint">
+                “Suggest Style” returns a structured map style. “Generate Map Code” writes editable JavaScript
+                that runs on the map.
+            </div>
         </section>
 
         <section class="card">
@@ -585,7 +541,24 @@
         </section>
 
         <section class="card">
-            <h2 class="section-title">Selected Dataset Summary</h2>
+            <label for="codeBox">Generated map script</label>
+            <textarea id="codeBox" class="code-box" spellcheck="false" placeholder="// LLM-generated code will appear here."></textarea>
+
+            <div class="row" style="margin-top: 10px;">
+                <button id="runBtn" class="success">Run in Map</button>
+                <button id="resetBtn" class="secondary">Reset Map</button>
+            </div>
+
+            <div id="runtimeLog" style="margin-top: 8px; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; max-height: 96px; overflow-y: auto; color: #9fd0a8;"></div>
+        </section>
+
+        <section class="card">
+            <h2 class="section-title">Active Map Layers <span id="overlayBadge" class="chip" style="display:none;"></span></h2>
+            <div id="layersPanel" class="small">No layers yet.</div>
+        </section>
+
+        <details class="card" id="summaryDetails">
+            <summary><span class="section-title">Selected Dataset Summary</span></summary>
 
             <div class="meta-grid">
                 <div class="metric">
@@ -620,10 +593,10 @@
                 <h3>Description / Metadata Notes</h3>
                 <div id="metaDescription" class="summary-empty">No description available.</div>
             </div>
-        </section>
+        </details>
 
-        <section class="card">
-            <h2 class="section-title">Top-k Retrieved Candidate Datasets</h2>
+        <details class="card">
+            <summary><span class="section-title">Behind the Scenes: Retrieval &amp; Timings</span></summary>
 
             <div class="table-wrap">
                 <table>
@@ -646,12 +619,8 @@
             <div class="table-note">
                 These are the candidates returned from semantic search before the LLM chooses one dataset.
             </div>
-        </section>
 
-        <section class="card">
-            <h2 class="section-title">Behind-the-Scenes Timings</h2>
-
-            <div class="meta-grid">
+            <div class="meta-grid" style="margin-top:12px;">
                 <div class="metric">
                     <div class="metric-label">Semantic Search Time</div>
                     <div class="metric-value" id="timingSearchMs">—</div>
@@ -669,30 +638,90 @@
                     <div class="metric-value" id="timingTotalMs">—</div>
                 </div>
             </div>
-        </section>
+        </details>
 
-        <section class="card">
-            <h2 class="section-title">Active Map Layers <span id="overlayBadge" class="chip" style="display:none;"></span></h2>
-            <div id="layersPanel" class="small">No layers yet.</div>
-        </section>
+        <details class="card">
+            <summary><span class="section-title">Browse Datasets</span></summary>
 
-        <section class="card">
-            <label for="codeBox">Generated / editable map script</label>
-            <textarea id="codeBox" class="code-box" spellcheck="false" placeholder="// LLM-generated code will appear here."></textarea>
-
-            <div class="row" style="margin-top: 10px;">
-                <button id="runBtn" class="success">Run In Map</button>
-                <button id="resetBtn" class="warning">Reset Map</button>
-                <button id="applyStateBtn" class="secondary">Apply Current Style</button>
+            <div class="row">
+                <div>
+                    <label for="datasetSelect">Available datasets</label>
+                    <select id="datasetSelect">
+                        <option value="">Loading datasets...</option>
+                    </select>
+                </div>
             </div>
 
-            <div id="runtimeLog" style="margin-top: 8px; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; max-height: 96px; overflow-y: auto; color: #9fd0a8;"></div>
-
-            <div class="hint">
-                The script runs inside <code>map.html</code> with access to <code>api</code>, <code>map</code>, and
-                <code>maplibregl</code>.
+            <div class="row" style="margin-top:10px;">
+                <button id="refreshDatasetsBtn" class="secondary">Refresh Datasets</button>
+                <button id="inspectDatasetBtn" class="secondary">Inspect Selected Dataset</button>
             </div>
-        </section>
+        </details>
+
+        {% if allow_uploads %}
+        <details class="card">
+            <summary><span class="section-title">Upload + Build Dataset</span></summary>
+
+            <p class="subtitle" style="margin-bottom:12px;">
+                Upload a dataset file, generate Catalyst tiles/MVTs, then rebuild the catalogue index.
+            </p>
+
+            <label for="uploadFile">Dataset file</label>
+            <input id="uploadFile" type="file"/>
+
+            <div class="row" style="margin-top:10px;">
+                <div>
+                    <label for="uploadDatasetName">Dataset name</label>
+                    <input id="uploadDatasetName" type="text" placeholder="Example: TIGER2018_COUNTY"/>
+                </div>
+            </div>
+
+            <div class="row" style="margin-top:10px;">
+                <div>
+                    <label for="uploadZoom">Zoom</label>
+                    <input id="uploadZoom" type="number" value="7" min="0"/>
+                </div>
+                <div>
+                    <label for="uploadThreshold">Threshold</label>
+                    <input id="uploadThreshold" type="number" value="0" min="0"/>
+                </div>
+            </div>
+
+            <details style="margin-top:10px;">
+                <summary class="hint" style="cursor:pointer;">Advanced: pgvector sync (optional)</summary>
+
+                <div class="row" style="margin-top:10px;">
+                    <div>
+                        <label for="pgHost">PG host</label>
+                        <input id="pgHost" type="text" value="localhost"/>
+                    </div>
+                    <div>
+                        <label for="pgPort">PG port</label>
+                        <input id="pgPort" type="number" value="5432"/>
+                    </div>
+                </div>
+
+                <div class="row" style="margin-top:10px;">
+                    <div>
+                        <label for="pgDb">PG database</label>
+                        <input id="pgDb" type="text" value="postgres"/>
+                    </div>
+                    <div>
+                        <label for="pgUser">PG user</label>
+                        <input id="pgUser" type="text" value="tarlan"/>
+                    </div>
+                </div>
+            </details>
+
+            <div class="row" style="margin-top:10px;">
+                <button id="uploadBuildBtn" class="warning">Upload + Build</button>
+            </div>
+
+            <div class="hint" id="uploadStatusBox" style="margin-top:10px;">
+                No upload job yet.
+            </div>
+        </details>
+        {% endif %}
     </aside>
 
     <main class="map-pane">
@@ -1428,15 +1457,21 @@
         postToMap({ type: "starlet:reset" });
     }
 
-    els.uploadBuildBtn.addEventListener("click", uploadAndBuildDataset);
+    // Upload controls are template-gated (allow_uploads); the Apply Current Style
+    // button was removed from the UI (styles auto-apply after every chat turn).
+    if (els.uploadBuildBtn) els.uploadBuildBtn.addEventListener("click", uploadAndBuildDataset);
     els.styleBtn.addEventListener("click", suggestStyle);
     els.codeBtn.addEventListener("click", generateMapCode);
     els.runBtn.addEventListener("click", runCode);
     els.resetBtn.addEventListener("click", resetMap);
-    els.applyStateBtn.addEventListener("click", applyStateToMap);
+    if (els.applyStateBtn) els.applyStateBtn.addEventListener("click", applyStateToMap);
 
     els.refreshDatasetsBtn.addEventListener("click", () => loadDatasetsCatalog());
-    els.inspectDatasetBtn.addEventListener("click", () => inspectDataset());
+    els.inspectDatasetBtn.addEventListener("click", () => {
+        const summary = document.getElementById("summaryDetails");
+        if (summary) summary.open = true;
+        inspectDataset();
+    });
 
     els.datasetSelect.addEventListener("change", async () => {
         const dataset = els.datasetSelect.value || "";
