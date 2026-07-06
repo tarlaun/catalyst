@@ -516,7 +516,27 @@
         </section>
 
         <section class="card">
-            <label for="promptBox">Prompt</label>
+            <label for="promptExamples">Try an example</label>
+            <select id="promptExamples">
+                <option value="">Choose an example prompt…</option>
+                <optgroup label="Single dataset — Suggest Style">
+                    <option>Color Riverside based on vegetation type.</option>
+                    <option>Color the fire hazard severity zones from moderate to very high risk.</option>
+                    <option>Show Riverside parks with a color gradient by acreage.</option>
+                    <option>Color Riverside highways by highway type.</option>
+                </optgroup>
+                <optgroup label="Cross-dataset — Suggest Style">
+                    <option>Color the buildings by the fire hazard zone they fall in.</option>
+                    <option>Visualize parks, highways and intersections in Riverside on one map.</option>
+                </optgroup>
+                <optgroup label="Interactive — Generate Map Code">
+                    <option>Highlight Riverside's vegetation patterns by coloring each vegetation type differently and using opacity to make large areas stand out while fading small patches.</option>
+                    <option>Allow me to click on a vegetation area, fade out all other polygons, and show a popup with its vegetation type and acreage.</option>
+                    <option>Classify vegetation patches into five acreage quantile classes computed from the data on screen.</option>
+                </optgroup>
+            </select>
+
+            <label for="promptBox" style="margin-top:10px;">Prompt</label>
             <textarea id="promptBox" placeholder="Example: Color Riverside by vegetation type."></textarea>
 
             <div class="row" style="margin-top: 10px;">
@@ -1465,6 +1485,13 @@
     els.runBtn.addEventListener("click", runCode);
     els.resetBtn.addEventListener("click", resetMap);
     if (els.applyStateBtn) els.applyStateBtn.addEventListener("click", applyStateToMap);
+
+    const promptExamples = document.getElementById("promptExamples");
+    if (promptExamples) promptExamples.addEventListener("change", () => {
+        if (!promptExamples.value) return;
+        els.promptBox.value = promptExamples.value;
+        els.promptBox.focus();
+    });
 
     els.refreshDatasetsBtn.addEventListener("click", () => loadDatasetsCatalog());
     els.inspectDatasetBtn.addEventListener("click", () => {
