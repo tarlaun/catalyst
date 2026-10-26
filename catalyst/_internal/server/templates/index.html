@@ -117,12 +117,12 @@
 
         textarea {
             resize: vertical;
-            min-height: 110px;
+            min-height: 76px;
             line-height: 1.45;
         }
 
         textarea.code-box {
-            min-height: 260px;
+            min-height: 160px;
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
             font-size: 12px;
             white-space: pre;
@@ -176,11 +176,12 @@
 
         .status-grid {
             display: grid;
-            grid-template-columns: 1fr;
+            grid-template-columns: minmax(0, 1fr);
             gap: 10px;
         }
 
         .pill {
+            min-width: 0;
             display: inline-flex;
             align-items: center;
             gap: 8px;
@@ -196,6 +197,7 @@
 
         .pill strong {
             color: var(--text);
+            min-width: 0;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -516,6 +518,13 @@
         </section>
 
         <section class="card">
+            <label for="datasetSelect">Available datasets</label>
+            <select id="datasetSelect">
+                <option value="">Loading datasets...</option>
+            </select>
+        </section>
+
+        <section class="card">
             <label for="promptExamples">Try an example</label>
             <select id="promptExamples">
                 <option value="">Choose an example prompt…</option>
@@ -524,7 +533,11 @@
                     <option>Show the fire hazard severity zones, colored from moderate to very high risk.</option>
                     <option>Color Riverside highways by their highway type (interstate, ramp, US highway).</option>
                 </optgroup>
-                <optgroup label="Combine datasets — use “Suggest Style”">
+                <optgroup label="Combine datasets — overlays &amp; spatial joins">
+                    <option>Show fire hazard zones and buildings together on one map.</option>
+                    <option>Color buildings by the fire hazard severity of the zone they fall in.</option>
+                    <option>Overlay recent earthquake epicenters on the fire hazard severity zones.</option>
+                    <option>Count the earthquakes in each fire hazard zone and color the zones by that count.</option>
                     <option>Visualize parks, highways and intersections in Riverside together on one map.</option>
                 </optgroup>
                 <optgroup label="Interactive maps — use “Generate Map Code”, then “Run in Map”">
@@ -559,8 +572,9 @@
             <div id="assistantBox" class="assistant-box">No response yet.</div>
         </section>
 
-        <section class="card">
-            <label for="codeBox">Generated map script</label>
+        <details class="card" id="codeDetails">
+            <summary><span class="section-title">Generated Map Script</span></summary>
+
             <textarea id="codeBox" class="code-box" spellcheck="false" placeholder="// LLM-generated code will appear here."></textarea>
 
             <div class="row" style="margin-top: 10px;">
@@ -574,7 +588,7 @@
                 “Generate Map Code” styles the map right away, but the generated behavior
                 (interactivity, custom logic) only takes effect after you press <strong>Run in Map</strong>.
             </div>
-        </section>
+        </details>
 
         <section class="card">
             <h2 class="section-title">Active Map Layers <span id="overlayBadge" class="chip" style="display:none;"></span></h2>
@@ -661,24 +675,6 @@
                     <div class="metric-label">Total Request Time</div>
                     <div class="metric-value" id="timingTotalMs">—</div>
                 </div>
-            </div>
-        </details>
-
-        <details class="card">
-            <summary><span class="section-title">Browse Datasets</span></summary>
-
-            <div class="row">
-                <div>
-                    <label for="datasetSelect">Available datasets</label>
-                    <select id="datasetSelect">
-                        <option value="">Loading datasets...</option>
-                    </select>
-                </div>
-            </div>
-
-            <div class="row" style="margin-top:10px;">
-                <button id="refreshDatasetsBtn" class="secondary">Refresh Datasets</button>
-                <button id="inspectDatasetBtn" class="secondary">Inspect Selected Dataset</button>
             </div>
         </details>
 
@@ -801,8 +797,7 @@
         uploadBuildBtn: document.getElementById("uploadBuildBtn"),
         uploadStatusBox: document.getElementById("uploadStatusBox"),
         datasetSelect: document.getElementById("datasetSelect"),
-        refreshDatasetsBtn: document.getElementById("refreshDatasetsBtn"),
-        inspectDatasetBtn: document.getElementById("inspectDatasetBtn"),
+        codeDetails: document.getElementById("codeDetails"),
         topKTableBody: document.getElementById("topKTableBody"),
         metaDatasetName: document.getElementById("metaDatasetName"),
         metaAttributeCount: document.getElementById("metaAttributeCount"),
@@ -1446,6 +1441,7 @@
 
             if (typeof data.generated_code === "string") {
                 els.codeBox.value = data.generated_code;
+                if (els.codeDetails) els.codeDetails.open = true;
                 showRuntimeLine("Code generated — press “Run in Map” to activate it.", false);
             }
 
@@ -1512,13 +1508,6 @@
         state.layers = [];
         updateStatus();
         els.promptBox.focus();
-    });
-
-    els.refreshDatasetsBtn.addEventListener("click", () => loadDatasetsCatalog());
-    els.inspectDatasetBtn.addEventListener("click", () => {
-        const summary = document.getElementById("summaryDetails");
-        if (summary) summary.open = true;
-        inspectDataset();
     });
 
     els.datasetSelect.addEventListener("change", async () => {
