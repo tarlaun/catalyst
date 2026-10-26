@@ -11,3 +11,5 @@ flask-cors
 geopandas>=0.14
 gunicorn
 datasketch
+certifi
+pmtiles>=3.7

@@ -18,6 +18,8 @@ Requires-Dist: flask-cors
 Requires-Dist: geopandas>=0.14
 Requires-Dist: gunicorn
 Requires-Dist: datasketch
+Requires-Dist: certifi
+Requires-Dist: pmtiles>=3.7
 
 # Starlet
 

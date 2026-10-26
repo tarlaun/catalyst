@@ -10,6 +10,7 @@ catalyst.egg-info/entry_points.txt
 catalyst.egg-info/requires.txt
 catalyst.egg-info/top_level.txt
 catalyst/_internal/__init__.py
+catalyst/_internal/_parallel.py
 catalyst/_internal/histogram/__init__.py
 catalyst/_internal/histogram/hist_pyramid.py
 catalyst/_internal/histogram/loader.py
@@ -19,6 +20,8 @@ catalyst/_internal/mvt/generator.py
 catalyst/_internal/mvt/helpers.py
 catalyst/_internal/mvt/renderer.py
 catalyst/_internal/mvt/streamer.py
+catalyst/_internal/pmtiles/__init__.py
+catalyst/_internal/pmtiles/exporter.py
 catalyst/_internal/server/__init__.py
 catalyst/_internal/server/app.py
 catalyst/_internal/server/download_service.py
@@ -28,6 +31,8 @@ catalyst/_internal/server/catalog/embedder.py
 catalyst/_internal/server/catalog/index.py
 catalyst/_internal/server/catalog/pgvector_store.py
 catalyst/_internal/server/catalog/router.py
+catalyst/_internal/server/derive/__init__.py
+catalyst/_internal/server/derive/spatial_aggregate.py
 catalyst/_internal/server/llm/__init__.py
 catalyst/_internal/server/llm/factory.py
 catalyst/_internal/server/llm/gemini_provider.py
@@ -36,12 +41,14 @@ catalyst/_internal/server/llm/prompt.md
 catalyst/_internal/server/llm/provider.py
 catalyst/_internal/server/llm/suggestions.py
 catalyst/_internal/server/templates/index.html
+catalyst/_internal/server/templates/map.html
 catalyst/_internal/server/tiler/__init__.py
 catalyst/_internal/server/tiler/mvt_encoder.py
 catalyst/_internal/server/tiler/parquet_index.py
 catalyst/_internal/server/tiler/tile_cache.py
 catalyst/_internal/server/tiler/tiler.py
 catalyst/_internal/server/tiler/tiler_bounds.py
+catalyst/_internal/server/tiler/virtual_derive.py
 catalyst/_internal/stats/__init__.py
 catalyst/_internal/stats/collector.py
 catalyst/_internal/stats/sketches.py
@@ -53,3 +60,5 @@ catalyst/_internal/tiling/datasource.py
 catalyst/_internal/tiling/orchestrator.py
 catalyst/_internal/tiling/utils_large.py
 catalyst/_internal/tiling/writer_pool.py
+tests/test_derive_dataset.py
+tests/test_spatial_aggregate.py
