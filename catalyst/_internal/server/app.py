@@ -1337,6 +1337,7 @@ def create_app(
         user_query: str,
         current_dataset: Optional[str],
         current_style: Optional[Dict[str, Any]],
+        active_join_source: Optional[str] = None,
     ) -> bool:
         q = _normalize_unicode_text(user_query).strip().lower()
         if not q:
@@ -1354,14 +1355,13 @@ def create_app(
         ):
             return True
 
-        if current_dataset and current_dataset.lower() in q:
-            return False
-
         # Naming the attribute currently being styled is a refinement.
         if current_style:
             target_attr = str(current_style.get("target_attribute", "")).lower()
             if target_attr and target_attr in q:
                 return False
+
+        mentions_current = bool(current_dataset and current_dataset.lower() in q)
 
         try:
             router = _get_catalog_router()
@@ -1374,6 +1374,18 @@ def create_app(
             return False
         if not results:
             return False
+
+        if mentions_current:
+            # The query names the current dataset — a refinement, UNLESS it also
+            # pulls in ANOTHER dataset strongly ("color buildings by the fire
+            # hazard severity..."): that is a cross-dataset combine/join, which
+            # the follow-up refine schema cannot express (the model then answers
+            # "this dataset has no such attribute" and paints everything grey).
+            # The source of an already-active join doesn't count: refining the
+            # joined layer is still a refinement.
+            ignore = {current_dataset, active_join_source or ""}
+            challenger = next((r for r in results if r.dataset not in ignore), None)
+            return bool(challenger and challenger.score >= _PIVOT_CHALLENGER_MIN)
 
         scores = {r.dataset: r.score for r in results}
         top = results[0]
@@ -1673,6 +1685,23 @@ def create_app(
             dataset_summary=selected_summary,
             style=turn.style,
         )
+
+        # The refine wants to style an attribute this dataset does not have (and
+        # no active join provides): that is a cross-dataset request misrouted as
+        # a refine — e.g. "color buildings by the fire hazard severity" sent
+        # while 'buildings' is already selected. A refine cannot create a join
+        # (empty categorical stops: every feature grey), so restart as an
+        # initial turn, where the derive path can handle it.
+        followup_attr = _normalize_unicode_text(
+            str(normalized_style.get("target_attribute") or "")
+        ).strip()
+        if followup_attr and not _find_attribute_summary(selected_summary, followup_attr):
+            logger.info(
+                "[ChatStyle] Follow-up styled unknown attribute %r on '%s'; "
+                "restarting retrieval (likely a cross-dataset join request).",
+                followup_attr, current_dataset,
+            )
+            return _run_initial_chat_turn(user_query=normalized_query, k=5)
 
         tile_metric = _get_tile_metric(current_dataset)
         total_ms = (perf_counter() - total_t0) * 1000.0
@@ -2102,10 +2131,16 @@ def create_app(
                 response, status = _run_initial_chat_turn(user_query=user_query, k=k)
                 return _json_response(response, status)
 
+            derive_live_body = body.get("derive_live")
+            active_join_source = (
+                _normalize_unicode_text(str(derive_live_body.get("source") or "")).strip()
+                if isinstance(derive_live_body, dict) else ""
+            )
             if _looks_like_new_dataset_request(
                 user_query=user_query,
                 current_dataset=current_dataset,
                 current_style=current_style,
+                active_join_source=active_join_source or None,
             ):
                 response, status = _run_initial_chat_turn(user_query=user_query, k=k)
                 return _json_response(response, status)

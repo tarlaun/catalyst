@@ -922,7 +922,15 @@
     }
 
     function updateStatus() {
-        els.datasetLabel.textContent = state.dataset || "None";
+        // Show every dataset in play: "target ⨝ source" for a live join,
+        // "a + b + c" for a multi-dataset overlay, else the single dataset.
+        let datasetText = state.dataset || "None";
+        if (state.deriveLive && state.deriveLive.target) {
+            datasetText = `${state.deriveLive.target} ⨝ ${state.deriveLive.source}`;
+        } else if (Array.isArray(state.layers) && state.layers.length > 1) {
+            datasetText = state.layers.map(l => l.dataset).join(" + ");
+        }
+        els.datasetLabel.textContent = datasetText;
         els.interactionLabel.textContent = state.interactionId || "None";
         els.assistantBox.textContent = state.lastAssistantResponse || "No response yet.";
         renderTopK();
@@ -933,6 +941,16 @@
     function renderLayers() {
         const layers = Array.isArray(state.layers) ? state.layers : [];
         if (!layers.length) {
+            if (state.deriveLive && state.deriveLive.target) {
+                const dl = state.deriveLive;
+                els.overlayBadge.textContent = "cross-dataset join · live";
+                els.overlayBadge.style.display = "inline-block";
+                els.layersPanel.innerHTML =
+                    `<div class="small">${escapeHtml(dl.target)} joined with ` +
+                    `${escapeHtml(dl.source)} on <code>${escapeHtml(dl.value_attribute)}</code> ` +
+                    `(computed per tile as you pan/zoom — nothing materialized).</div>`;
+                return;
+            }
             els.layersPanel.innerHTML = "No layers yet.";
             els.overlayBadge.style.display = "none";
             return;
