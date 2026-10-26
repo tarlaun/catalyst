@@ -2312,6 +2312,19 @@ def create_app(
         except Exception:
             k = 5
 
+        # Active lazy join reported by the client: code generated against the
+        # joined layer must know the joined attribute, and the join's source
+        # must not count as a "new dataset" in the pivot check.
+        code_derive_live = body.get("derive_live")
+        code_join_source = code_join_value = ""
+        if isinstance(code_derive_live, dict):
+            cdl_target = _normalize_unicode_text(str(code_derive_live.get("target") or "")).strip()
+            code_join_source = _normalize_unicode_text(str(code_derive_live.get("source") or "")).strip()
+            code_join_value = _normalize_unicode_text(str(code_derive_live.get("value_attribute") or "")).strip()
+            if (cdl_target != current_dataset or not code_join_source or not code_join_value
+                    or not _dataset_exists(code_join_source)):
+                code_join_source = code_join_value = ""
+
         # Same pivot rule as chat-style: if the prompt clearly targets a different
         # dataset than the ongoing conversation, re-route instead of generating
         # code against the stale one.
@@ -2319,11 +2332,13 @@ def create_app(
             user_query=user_query,
             current_dataset=current_dataset,
             current_style=current_style,
+            active_join_source=code_join_source or None,
         ):
             current_dataset = ""
             interaction_id = ""
             current_style = {}
             current_attributes = []
+            code_join_source = code_join_value = ""
 
         try:
             total_t0 = perf_counter()
@@ -2332,8 +2347,14 @@ def create_app(
 
             if not current_dataset:
                 initial_t0 = perf_counter()
-                initial_response, _ = _run_initial_chat_turn(user_query=user_query, k=k)
+                initial_response, initial_status = _run_initial_chat_turn(user_query=user_query, k=k)
                 bootstrap_ms = (perf_counter() - initial_t0) * 1000.0
+
+                # The bootstrap decided a materialized derive is needed: code
+                # cannot be generated against a dataset that is still building,
+                # so hand the derive job straight to the client to poll.
+                if initial_response.get("mode") == "deriving":
+                    return _json_response(initial_response, initial_status)
 
                 current_dataset = _normalize_unicode_text(initial_response.get("selected_dataset", "")).strip()
                 interaction_id = _normalize_unicode_text(initial_response.get("interaction_id", "")).strip()
@@ -2341,6 +2362,13 @@ def create_app(
                 current_attributes = initial_response.get("selected_attributes") or []
                 top_k_payload = initial_response.get("top_k") or []
                 semantic_search_ms = float((initial_response.get("timings") or {}).get("semantic_search_ms") or 0.0)
+                # A join bootstrap ("color buildings by the hazard of their zone")
+                # answers with a derive-live spec: it MUST reach the client, or the
+                # map keeps serving plain target tiles and every haz_class paint
+                # falls to the fallback color (the all-grey bug).
+                bootstrap_derive_live = initial_response.get("derive_live")
+                if not isinstance(bootstrap_derive_live, dict):
+                    bootstrap_derive_live = None
 
                 if not current_dataset:
                     return _json_response({"error": "Could not determine a dataset for map-code generation."}, 500)
@@ -2349,6 +2377,16 @@ def create_app(
                     return _json_response({"error": f"Dataset not found: {current_dataset}"}, 404)
 
                 dataset_summary = _dataset_summary_for_llm(current_dataset)
+                if bootstrap_derive_live:
+                    src_attr = _find_attribute_summary(
+                        _dataset_summary_for_llm(str(bootstrap_derive_live.get("source") or "")),
+                        str(bootstrap_derive_live.get("value_attribute") or ""),
+                    )
+                    if src_attr:
+                        dataset_summary = {
+                            **dataset_summary,
+                            "attributes": list(dataset_summary.get("attributes", [])) + [src_attr],
+                        }
 
                 if not current_style:
                     current_style = _normalize_style_for_client(
@@ -2382,6 +2420,7 @@ def create_app(
                     "style": current_style,
                     "generated_code": _normalize_unicode_text(code_turn.code),
                     "top_k": top_k_payload,
+                    **({"derive_live": bootstrap_derive_live} if bootstrap_derive_live else {}),
                     "timings": {
                         "semantic_search_ms": round(semantic_search_ms, 3),
                         "llm_ms": round(llm_ms, 3),
@@ -2396,6 +2435,15 @@ def create_app(
                 return _json_response({"error": f"Dataset not found: {current_dataset}"}, 404)
 
             dataset_summary = _dataset_summary_for_llm(current_dataset)
+            if code_join_source:
+                src_attr = _find_attribute_summary(
+                    _dataset_summary_for_llm(code_join_source), code_join_value,
+                )
+                if src_attr:
+                    dataset_summary = {
+                        **dataset_summary,
+                        "attributes": list(dataset_summary.get("attributes", [])) + [src_attr],
+                    }
 
             if not current_style:
                 current_style = _normalize_style_for_client(
@@ -2429,6 +2477,11 @@ def create_app(
                 "style": current_style,
                 "generated_code": _normalize_unicode_text(code_turn.code),
                 "top_k": top_k_payload,
+                **({"derive_live": {
+                    "target": current_dataset,
+                    "source": code_join_source,
+                    "value_attribute": code_join_value,
+                }} if code_join_source else {}),
                 "timings": {
                     "semantic_search_ms": round(semantic_search_ms, 3),
                     "llm_ms": round(llm_ms, 3),

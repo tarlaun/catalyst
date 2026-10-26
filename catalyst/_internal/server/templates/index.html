@@ -1538,6 +1538,8 @@
                 current_dataset: state.dataset,
                 current_attributes: state.selectedAttributes,
                 current_style: state.currentStyle,
+                // Active lazy join: code must be generated against the joined layer
+                derive_live: state.deriveLive || undefined,
                 k: 5
             });
 
