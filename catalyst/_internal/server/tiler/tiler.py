@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from time import perf_counter
 
@@ -9,6 +10,13 @@ from .tile_cache import TileCache
 from shapely.geometry import mapping
 
 logger = logging.getLogger(__name__)
+
+# Pre-generated tiles larger than this are regenerated with the fast path
+# instead of served from disk: legacy build pipelines wrote multi-MB tiles at
+# low zooms (no raster-consistent capping), and shipping those dominates
+# user-perceived latency. The regenerated tile is memory-cached, so the cost
+# is paid once per tile per process. Set to 0 to disable the guard.
+PREGEN_MAX_BYTES = int(os.environ.get("CATALYST_PREGEN_MAX_BYTES", str(400 * 1024)))
 
 from shapely.geometry import (
     Point,
@@ -63,6 +71,25 @@ class VectorTiler:
         return self.mvt_dir / str(z) / str(x) / f"{y}.mvt"
 
     def generate(self, z: int, x: int, y: int) -> bytes:
+        """Generate a tile on the fly.
+
+        Prefers the vectorised single-tile pipeline (ported from starlet:
+        bbox/row-group pruning, raster-consistent selection, numpy MVT
+        encoding); falls back to the legacy per-row GeoPandas path on error.
+        """
+        t0 = perf_counter()
+        try:
+            from catalyst._internal.mvt.fast_tile import generate_tile
+
+            tile_bytes = generate_tile(self.parquet_dir, (z, x, y), index=self.index)
+            logger.info("[TileGen] z=%d x=%d y=%d fast path %d bytes elapsed=%.1fms",
+                        z, x, y, len(tile_bytes), (perf_counter() - t0) * 1000)
+            return tile_bytes
+        except Exception:
+            logger.exception("[TileGen] z=%d x=%d y=%d fast path failed; using legacy path", z, x, y)
+            return self._generate_legacy(z, x, y)
+
+    def _generate_legacy(self, z: int, x: int, y: int) -> bytes:
         t0 = perf_counter()
         bounds = TileBounds(z, x, y)
         encoder = MVTEncoder(bounds.bbox_3857, bounds.tile_poly_3857)
@@ -152,12 +179,17 @@ class VectorTiler:
         path = self.tile_path(z, x, y)
 
         if path.exists():
-            t0 = perf_counter()
-            data = path.read_bytes()
-            elapsed_ms = (perf_counter() - t0) * 1000
-            logger.debug("[Cache] HIT disk z=%d x=%d y=%d elapsed=%.1fms", z, x, y, elapsed_ms)
-            self.cache.put(key, data)
-            return data
+            size = path.stat().st_size
+            if PREGEN_MAX_BYTES and size > PREGEN_MAX_BYTES and self.parquet_dir.is_dir():
+                # Bloated legacy pre-generated tile: regenerate compactly instead.
+                logger.info("[Cache] SKIP oversized pregen z=%d x=%d y=%d (%d bytes) — regenerating", z, x, y, size)
+            else:
+                t0 = perf_counter()
+                data = path.read_bytes()
+                elapsed_ms = (perf_counter() - t0) * 1000
+                logger.debug("[Cache] HIT disk z=%d x=%d y=%d elapsed=%.1fms", z, x, y, elapsed_ms)
+                self.cache.put(key, data)
+                return data
 
         logger.info("[Cache] MISS z=%d x=%d y=%d — generating (memory cache only)", z, x, y)
 

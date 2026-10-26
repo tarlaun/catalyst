@@ -38,6 +38,9 @@ BBox = Tuple[float, float, float, float]
 # Per-row bbox covering columns written by the tiling stage (see writer_pool).
 BBOX_COLS = ("_bbox_xmin", "_bbox_ymin", "_bbox_xmax", "_bbox_ymax")
 
+# Columns internal to the tiling pipeline, never served as feature attributes.
+INTERNAL_COLS = ("_tile_id", "geo_parquet_tile_num", *BBOX_COLS)
+
 
 def parse_parquet_bbox(fname: str) -> Optional[BBox]:
     """Parse ``(minx, miny, maxx, maxy)`` from a tile filename, or ``None``.

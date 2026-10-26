@@ -1,13 +1,15 @@
 """Lazy cross-dataset derive: join a small source layer into each requested
 target tile *at serve time* — no materialization, no re-tiling.
 
-For each requested (z,x,y) we fetch the target's existing tile (from its pyramid
-or on-the-fly), decode it, and annotate every feature with the value of the
-source polygon that contains a representative point of the feature, then
-re-encode. The source (assumed small, e.g. hazard zones) is loaded once,
-reprojected to 3857, and spatially indexed. Results are cached per tile so
-panning stays interactive. The per-feature join is vectorised (one batched
-spatial join), not a Python loop, so even dense city-wide tiles stay fast.
+The join runs *inside* the fast tile generator (``fast_tile.generate_tile``'s
+``annotate`` hook), not on a finished MVT: selected target features are joined
+by bbox-centre point-in-polygon against an STRtree of the source (one batched
+shapely query per tile), and sub-pixel packed dots are grouped per joined
+class so dense city-zoom targets (3.9M buildings) stay colorable. Tiles whose
+bbox misses the source entirely short-circuit to the target's own (cached /
+pre-generated) tile. Decoding + re-encoding the MVT with the pure-Python codec
+— the old approach, seconds per dense tile and capped at 2500 sampled
+features — remains only as a fallback for datasets the fast path can't read.
 """
 from __future__ import annotations
 
@@ -16,7 +18,11 @@ import os
 
 import geopandas as gpd
 import mapbox_vector_tile
+import numpy as np
+import shapely
 from shapely.geometry import box
+
+from catalyst._internal.mvt.fast_tile import TileFrame, generate_tile
 
 from .tile_cache import TileCache
 from .tiler import VectorTiler
@@ -61,19 +67,58 @@ class VirtualDeriveTiler:
             src = src.set_crs(4326)
         if value_attribute not in src.columns:
             raise ValueError(f"source has no attribute {value_attribute!r}")
-        self.source = (
-            src[[value_attribute, "geometry"]].to_crs(3857).reset_index(drop=True)
-        )
+
+        # Fast join structures (EPSG:4326, same CRS as the parquet partitions):
+        # geometries with a non-null value, an STRtree over them, and the values.
+        src4326 = src[[value_attribute, "geometry"]].to_crs(4326).reset_index(drop=True)
+        keep = src4326[value_attribute].notna().to_numpy()
+        self._src_geoms = np.asarray(src4326.geometry.values[keep], dtype=object)
+        self._src_vals = np.asarray(src4326[value_attribute].to_numpy(dtype=object)[keep])
+        self._tree = shapely.STRtree(self._src_geoms)
+
+        # Legacy fallback (MVT decode/re-encode) joins in 3857.
+        self.source = src4326.to_crs(3857)
         self.source.sindex  # build the spatial index eagerly
         self.cache = TileCache(memory_cache_size)
+
+    def _join_values(self, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
+        """Joined source value per (lon, lat) point, None where nothing matches
+        — one batched STRtree query, no per-feature Python work."""
+        pts = shapely.points(lon, lat)
+        out = np.full(len(pts), None, dtype=object)
+        qi, si = self._tree.query(pts, predicate="intersects")
+        if len(qi):
+            # reversed so, on overlap, the first matching source feature wins
+            out[qi[::-1]] = self._src_vals[si[::-1]]
+        return out
 
     def get_tile(self, z: int, x: int, y: int) -> bytes:
         key = (z, x, y)
         cached = self.cache.get(key)
         if cached is not None:
             return cached
-        base = self.target.get_tile(z, x, y)
-        out = self._annotate(base, z, x, y)
+        out = None
+        pdir = getattr(self.target, "parquet_dir", None)
+        if pdir is not None and pdir.is_dir():
+            try:
+                qx0, qy0, qx1, qy1 = TileFrame(z, x, y, EXTENT, 256).query_lonlat
+                if len(self._tree.query(box(qx0, qy0, qx1, qy1))) == 0:
+                    # no source anywhere near: the target's own tile is the answer
+                    # (served from its cache / pre-generated pyramid, usually free)
+                    return self.target.get_tile(z, x, y)
+                out = generate_tile(
+                    pdir,
+                    (z, x, y),
+                    index=getattr(self.target, "index", None),
+                    annotate=self._join_values,
+                    annotate_attribute=self.output_attribute,
+                )
+            except Exception:
+                logger.exception("[VirtualDerive] fast join tile failed for %s/%s/%s", z, x, y)
+                out = None
+        if out is None:
+            base = self.target.get_tile(z, x, y)
+            out = self._annotate(base, z, x, y)
         self.cache.put(key, out)
         return out
 

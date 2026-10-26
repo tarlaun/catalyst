@@ -1355,13 +1355,18 @@ def create_app(
                 assistant_response = _normalize_unicode_text(multi.assistant_response or "")
                 derive_target = _normalize_unicode_text(str(spec.get("target_dataset", ""))).strip()
                 derive_source = _normalize_unicode_text(str(spec.get("source_dataset", ""))).strip()
-                derive_value = _normalize_unicode_text(str(spec.get("value_attribute", ""))).strip()
+                # `or ""` so a spec with value_attribute=None does not become "None".
+                derive_value = _normalize_unicode_text(str(spec.get("value_attribute") or "")).strip()
+                derive_agg = str(spec.get("aggregate") or "dominant").strip().lower()
 
                 # LIVE lazy derive: when a value/categorical source is small, color
                 # the target by the source value at each feature's location, joined
                 # per tile at serve time (no build, no wait). Instant + interactive.
+                # Only value annotation ("dominant") can be joined per tile;
+                # aggregations (count/sum/mean/...) need the materialized derive.
                 if (
                     derive_target and derive_source and derive_value
+                    and derive_agg == "dominant" and derive_value.lower() != "none"
                     and _dataset_exists(derive_target) and _dataset_exists(derive_source)
                     and 0 < _dataset_row_count(derive_source) <= _TILED_DERIVE_MAX_SOURCE
                 ):
@@ -1890,6 +1895,37 @@ def create_app(
             resp.headers["Cache-Control"] = "no-cache"
         return resp
 
+    _GZIP_TYPES = ("application/vnd.mapbox-vector-tile", "application/json", "application/geo+json", "text/csv")
+
+    @app.after_request
+    def _compress_response(resp):
+        # MVT protobufs and JSON gzip ~2-4x; nothing upstream compresses (the
+        # reverse proxy passes tiles through as-is), so transfer time dominates
+        # large tiles without this. Compress only sizable, uncompressed bodies
+        # for clients that accept gzip.
+        if (
+            resp.direct_passthrough
+            or resp.status_code != 200
+            or resp.headers.get("Content-Encoding")
+            or resp.mimetype not in _GZIP_TYPES
+            or "gzip" not in request.headers.get("Accept-Encoding", "").lower()
+        ):
+            return resp
+        body = resp.get_data()
+        if len(body) < 1024:
+            return resp
+        import gzip as _gzip
+
+        resp.set_data(_gzip.compress(body, compresslevel=6))
+        resp.headers["Content-Encoding"] = "gzip"
+        resp.headers["Content-Length"] = str(resp.content_length)
+        resp.headers.add("Vary", "Accept-Encoding")
+        if resp.mimetype == "application/vnd.mapbox-vector-tile":
+            # Tile bytes for a dataset only change on rebuild; let the browser
+            # keep them for the session.
+            resp.headers.setdefault("Cache-Control", "public, max-age=3600")
+        return resp
+
     @app.route("/<path:filename>")
     def serve_file(filename):
         normalized = filename.strip("/")
@@ -2311,5 +2347,69 @@ def create_app(
         Thread(target=_derived_sweeper, daemon=True).start()
         logger.info("[Derive] ephemeral mode ON: derived datasets removed after %.0f min",
                     _derived_ttl_min)
+
+    if os.environ.get("CATALYST_PREWARM", "1") not in ("0", "false", "no"):
+        def _prewarm_tiles() -> None:
+            """Fill each dataset's row-group cache in the background: one
+            on-the-fly tile covering the whole dataset reads every row group,
+            so the first real viewport request never pays the cold-cache cost
+            (~10 s on the largest dataset)."""
+            import math as _math
+
+            for ds_dir in sorted(data_root.iterdir()):
+                if not (ds_dir / "parquet_tiles").is_dir():
+                    continue
+                try:
+                    stats = json.loads((ds_dir / "stats" / "attributes.json").read_text())
+
+                    def _find_mbr(obj):
+                        if isinstance(obj, dict):
+                            if "mbr" in obj:
+                                return obj["mbr"]
+                            for v in obj.values():
+                                r = _find_mbr(v)
+                                if r:
+                                    return r
+                        if isinstance(obj, list):
+                            for v in obj:
+                                r = _find_mbr(v)
+                                if r:
+                                    return r
+                        return None
+
+                    mbr = _find_mbr(stats)
+                    if not mbr:
+                        continue
+
+                    def _tile_of(lon, lat, z):
+                        n = 2 ** z
+                        lat = max(-85.0, min(85.0, lat))
+                        tx = min(n - 1, max(0, int((lon + 180.0) / 360.0 * n)))
+                        ty = min(n - 1, max(0, int((1 - _math.log(_math.tan(_math.radians(lat)) + 1 / _math.cos(_math.radians(lat))) / _math.pi) / 2 * n)))
+                        return tx, ty
+
+                    span = max(mbr[2] - mbr[0], (mbr[3] - mbr[1]) * 2, 1e-6)
+                    zfit = max(0, min(10, int(_math.log2(360.0 / span))))
+                    tiler = get_tiler(ds_dir.name)
+                    t0 = perf_counter()
+                    warmed = 0
+                    # The fit view and the first couple of zoom-ins are what a
+                    # fresh visitor requests; generating them here fills both
+                    # the row-group cache and the per-dataset tile cache.
+                    for z in range(zfit, min(zfit + 3, 15)):
+                        x0, y0 = _tile_of(mbr[0], mbr[3], z)
+                        x1, y1 = _tile_of(mbr[2], mbr[1], z)
+                        for tx in range(x0, x1 + 1):
+                            for ty in range(y0, y1 + 1):
+                                if warmed >= 60:
+                                    break
+                                tiler.get_tile(z, tx, ty)
+                                warmed += 1
+                    logger.info("[Prewarm] %s z=%d..%d (%d tiles) warmed in %.1fs",
+                                ds_dir.name, zfit, min(zfit + 2, 14), warmed, perf_counter() - t0)
+                except Exception:
+                    logger.warning("[Prewarm] %s failed (non-fatal)", ds_dir.name, exc_info=True)
+
+        Thread(target=_prewarm_tiles, daemon=True).start()
 
     return app
