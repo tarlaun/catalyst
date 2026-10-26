@@ -66,6 +66,16 @@ class VectorTiler:
         self.index = ParquetIndex(self.parquet_dir)
 
         self.cache = TileCache(memory_cache_size)
+        # EMA of observed on-the-fly generation latency (ms); None until the
+        # first generate. Reported in the demo's timing panel, where a cache
+        # hit would otherwise read as a meaningless 0.0 ms render time.
+        self.render_ms_ema: float | None = None
+
+    def _record_render_ms(self, elapsed_ms: float) -> None:
+        if self.render_ms_ema is None:
+            self.render_ms_ema = elapsed_ms
+        else:
+            self.render_ms_ema = 0.5 * self.render_ms_ema + 0.5 * elapsed_ms
 
     def tile_path(self, z: int, x: int, y: int) -> Path:
         return self.mvt_dir / str(z) / str(x) / f"{y}.mvt"
@@ -82,8 +92,10 @@ class VectorTiler:
             from catalyst._internal.mvt.fast_tile import generate_tile
 
             tile_bytes = generate_tile(self.parquet_dir, (z, x, y), index=self.index)
+            elapsed_ms = (perf_counter() - t0) * 1000
+            self._record_render_ms(elapsed_ms)
             logger.info("[TileGen] z=%d x=%d y=%d fast path %d bytes elapsed=%.1fms",
-                        z, x, y, len(tile_bytes), (perf_counter() - t0) * 1000)
+                        z, x, y, len(tile_bytes), elapsed_ms)
             return tile_bytes
         except Exception:
             logger.exception("[TileGen] z=%d x=%d y=%d fast path failed; using legacy path", z, x, y)
@@ -161,6 +173,7 @@ class VectorTiler:
 
         try:
             elapsed_ms = (perf_counter() - t0) * 1000
+            self._record_render_ms(elapsed_ms)
             logger.info("[TileGen] z=%d x=%d y=%d features=%d elapsed=%.1fms",
                         z, x, y, len(features), elapsed_ms)
             return encoder.encode(features)

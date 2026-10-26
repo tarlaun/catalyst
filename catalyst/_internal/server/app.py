@@ -1213,11 +1213,16 @@ def create_app(
         return layers
 
     def _warm_tile_render_ms(datasets: List[str]) -> Optional[float]:
-        """Render one representative tile per dataset and return the max latency.
+        """Server-measured MVT render time (max over the given datasets) for the
+        timing panel (reviewers asked specifically for the MVT rendering cost).
 
-        Gives an immediate, server-measured MVT render time for the timing panel
-        (reviewers asked specifically for the MVT rendering cost), and warms the
-        on-disk/cache tiers so the first browser fetch is fast.
+        Prefers each tiler's *observed* generation latency (EMA over every
+        on-the-fly generate, including the boot prewarm) — timing a cache hit
+        here would report a meaningless 0.0 ms, and forcing a fresh city-wide
+        regeneration would add seconds to every chat request. Only when a tiler
+        has never generated anything is one small representative tile rendered
+        (dataset-fit zoom + 2, so it covers ~1/16th of the extent, not z7 of a
+        3.9M-row dataset).
         """
         import math as _math
 
@@ -1232,21 +1237,24 @@ def create_app(
         worst: Optional[float] = None
         for dataset in datasets:
             try:
-                from catalyst._types import Dataset as _Dataset
-                bbox = _Dataset(str(data_root / dataset)).bbox
-                if not bbox:
-                    continue
-                cx = (bbox[0] + bbox[2]) / 2.0
-                cy = (bbox[1] + bbox[3]) / 2.0
-                z = 7
-                x, y = _lonlat_to_tile(cx, cy, z)
                 tiler = get_tiler(dataset)
-                t0 = perf_counter()
-                tiler.get_tile(z, x, y)
-                elapsed = (perf_counter() - t0) * 1000.0
+                elapsed = getattr(tiler, "render_ms_ema", None)
+                if elapsed is None:
+                    from catalyst._types import Dataset as _Dataset
+                    bbox = _Dataset(str(data_root / dataset)).bbox
+                    if not bbox:
+                        continue
+                    cx = (bbox[0] + bbox[2]) / 2.0
+                    cy = (bbox[1] + bbox[3]) / 2.0
+                    span = max(bbox[2] - bbox[0], (bbox[3] - bbox[1]) * 2.0, 1e-6)
+                    z = max(0, min(12, int(_math.log2(360.0 / span)) + 2))
+                    x, y = _lonlat_to_tile(cx, cy, z)
+                    t0 = perf_counter()
+                    tiler.generate(z, x, y)
+                    elapsed = (perf_counter() - t0) * 1000.0
                 worst = elapsed if worst is None else max(worst, elapsed)
             except Exception:
-                logger.exception("[Overlay] tile warm failed for %s", dataset)
+                logger.exception("[Overlay] tile render timing failed for %s", dataset)
         return round(worst, 3) if worst is not None else None
 
     # Follow-up pivot detection is decided against the live semantic index, not a
@@ -1396,6 +1404,8 @@ def create_app(
                             f"Coloring {derive_target} by {derive_value.replace('_', ' ')} "
                             f"from {derive_source} — joined live as you pan/zoom."
                         )
+                        live_llm_ms = (perf_counter() - llm_t0) * 1000.0
+                        live_render_ms = _warm_tile_render_ms([derive_target])
                         return {
                             "mode": "derive-live", "query": normalized_query,
                             "interaction_id": interaction_id,
@@ -1412,6 +1422,12 @@ def create_app(
                                 "value_attribute": derive_value,
                             },
                             "top_k": candidate_payload,
+                            "timings": {
+                                "semantic_search_ms": round(semantic_search_ms, 3),
+                                "llm_ms": round(live_llm_ms, 3),
+                                "mvt_render_ms": live_render_ms,
+                                "total_ms": round((perf_counter() - total_t0) * 1000.0, 3),
+                            },
                         }, 200
                     except Exception:
                         logger.exception("[ChatStyle] live-derive setup failed; using materialized build")
@@ -1443,6 +1459,12 @@ def create_app(
                     "selection_mode": "deriving",
                     "derive_job_id": job_id, "derive": spec,
                     "top_k": candidate_payload,
+                    "timings": {
+                        "semantic_search_ms": round(semantic_search_ms, 3),
+                        "llm_ms": round((perf_counter() - llm_t0) * 1000.0, 3),
+                        "mvt_render_ms": None,
+                        "total_ms": round((perf_counter() - total_t0) * 1000.0, 3),
+                    },
                 }, 202
             layers = _llm_overlay_layers(multi, candidate_by_name)
             if not layers:

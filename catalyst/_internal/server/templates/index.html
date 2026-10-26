@@ -997,9 +997,11 @@
         const total = Number(t.total_ms);
         els.timingTotalMs.textContent = Number.isFinite(total) ? `Total ${formatMs(total)}` : "—";
 
+        // Keep 0-valued stages: the min-width still renders them as a visible
+        // sliver, which reads better than a stage silently disappearing.
         const stages = TIMING_STAGES
             .map(s => ({ ...s, ms: Number(t[s.key]) }))
-            .filter(s => Number.isFinite(s.ms) && s.ms > 0);
+            .filter(s => Number.isFinite(s.ms) && s.ms >= 0);
         if (!stages.length) {
             els.timingBar.innerHTML = `<div class="timing-bar-empty">No request yet.</div>`;
             els.timingLegend.innerHTML = "";
