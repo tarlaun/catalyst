@@ -24,6 +24,8 @@ typed into the live UI; all succeeded.
 | 14 | `14_buildings_by_fhsz_fast_z13_malibu.png` | (same, zoomed Chatsworth ~z13) | derive-live fast path | Very High buildings blue in Santa Susana hills, unzoned valley grey |
 | 15 | `15_buildings_by_fhsz_fast_footprints.png` | (same, footprint zoom ~z15) | derive-live fast path | Individual footprints colored by zone; grey exactly at zone boundary |
 
+| 16 | `16_timing_bar.png` | Show the fire hazard severity zones... | Suggest Style | New stacked timing bar: search 268ms / LLM 10.6s / render 0ms, min-width keeps short stages visible |
+
 2026-10-26 derive-live rewrite: the join now runs inside `fast_tile.generate_tile`
 (`annotate` hook — batched STRtree point-in-polygon on feature bbox centres) instead
 of decoding + re-encoding the finished MVT with the pure-Python codec. Sub-pixel

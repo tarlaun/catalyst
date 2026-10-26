@@ -271,6 +271,69 @@
             color: var(--text);
         }
 
+        .timing-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 6px;
+        }
+
+        .timing-total {
+            font-size: 13px;
+            font-weight: 800;
+            color: var(--text);
+        }
+
+        .timing-bar {
+            display: flex;
+            width: 100%;
+            height: 26px;
+            border-radius: 8px;
+            overflow: hidden;
+            background: rgba(148, 163, 184, 0.12);
+            border: 1px solid var(--border);
+        }
+
+        .timing-seg {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            /* min-width keeps a very short stage visible next to a long one */
+            min-width: 52px;
+            font-size: 11px;
+            font-weight: 700;
+            color: #0b1120;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+
+        .timing-bar-empty {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            color: var(--muted);
+        }
+
+        .timing-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 14px;
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text);
+        }
+
+        .timing-chip {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 3px;
+            margin-right: 5px;
+            vertical-align: baseline;
+        }
+
         .summary-box {
             background: #0d1329;
             border: 1px solid var(--border);
@@ -658,23 +721,15 @@
                 These are the candidates returned from semantic search before the LLM chooses one dataset.
             </div>
 
-            <div class="meta-grid" style="margin-top:12px;">
-                <div class="metric">
-                    <div class="metric-label">Semantic Search Time</div>
-                    <div class="metric-value" id="timingSearchMs">—</div>
+            <div style="margin-top:12px;">
+                <div class="timing-header">
+                    <span class="metric-label" style="margin-bottom:0;">Request Timing Breakdown</span>
+                    <span class="timing-total" id="timingTotalMs">—</span>
                 </div>
-                <div class="metric">
-                    <div class="metric-label">LLM Request Time</div>
-                    <div class="metric-value" id="timingLlmMs">—</div>
+                <div class="timing-bar" id="timingBar">
+                    <div class="timing-bar-empty">No request yet.</div>
                 </div>
-                <div class="metric">
-                    <div class="metric-label">MVT Render Time</div>
-                    <div class="metric-value" id="timingRenderMs">—</div>
-                </div>
-                <div class="metric">
-                    <div class="metric-label">Total Request Time</div>
-                    <div class="metric-value" id="timingTotalMs">—</div>
-                </div>
+                <div class="timing-legend" id="timingLegend"></div>
             </div>
         </details>
 
@@ -807,9 +862,8 @@
         attributeMetaCards: document.getElementById("attributeMetaCards"),
         attributeMetaEmpty: document.getElementById("attributeMetaEmpty"),
         metaDescription: document.getElementById("metaDescription"),
-        timingSearchMs: document.getElementById("timingSearchMs"),
-        timingLlmMs: document.getElementById("timingLlmMs"),
-        timingRenderMs: document.getElementById("timingRenderMs"),
+        timingBar: document.getElementById("timingBar"),
+        timingLegend: document.getElementById("timingLegend"),
         timingTotalMs: document.getElementById("timingTotalMs"),
         layersPanel: document.getElementById("layersPanel"),
         overlayBadge: document.getElementById("overlayBadge")
@@ -821,6 +875,7 @@
     function formatMs(value) {
         const n = Number(value);
         if (!Number.isFinite(n)) return "—";
+        if (n >= 1000) return `${(n / 1000).toFixed(2)} s`;
         return `${n.toFixed(1)} ms`;
     }
 
@@ -931,12 +986,38 @@
         }).join("");
     }
 
+    const TIMING_STAGES = [
+        { key: "semantic_search_ms", label: "Semantic Search", color: "#38bdf8" },
+        { key: "llm_ms", label: "LLM Request", color: "#a78bfa" },
+        { key: "mvt_render_ms", label: "MVT Render", color: "#34d399" },
+    ];
+
     function renderTimings() {
         const t = state.timings || {};
-        els.timingSearchMs.textContent = formatMs(t.semantic_search_ms);
-        els.timingLlmMs.textContent = formatMs(t.llm_ms);
-        els.timingRenderMs.textContent = formatMs(t.mvt_render_ms);
-        els.timingTotalMs.textContent = formatMs(t.total_ms);
+        const total = Number(t.total_ms);
+        els.timingTotalMs.textContent = Number.isFinite(total) ? `Total ${formatMs(total)}` : "—";
+
+        const stages = TIMING_STAGES
+            .map(s => ({ ...s, ms: Number(t[s.key]) }))
+            .filter(s => Number.isFinite(s.ms) && s.ms > 0);
+        if (!stages.length) {
+            els.timingBar.innerHTML = `<div class="timing-bar-empty">No request yet.</div>`;
+            els.timingLegend.innerHTML = "";
+            return;
+        }
+        // Anything the three stages don't account for (network, server glue).
+        const sum = stages.reduce((acc, s) => acc + s.ms, 0);
+        if (Number.isFinite(total) && total - sum > Math.max(1, total * 0.02)) {
+            stages.push({ label: "Other", color: "#64748b", ms: total - sum });
+        }
+        // flex-grow proportional to time; min-width in CSS keeps short stages visible
+        els.timingBar.innerHTML = stages.map(s => `
+            <div class="timing-seg" style="flex:${s.ms} 1 0; background:${s.color};"
+                 title="${s.label}: ${formatMs(s.ms)}">${formatMs(s.ms)}</div>
+        `).join("");
+        els.timingLegend.innerHTML = stages.map(s => `
+            <span><span class="timing-chip" style="background:${s.color}"></span>${s.label} · ${formatMs(s.ms)}</span>
+        `).join("");
     }
 
     function renderList(targetEl, emptyEl, items, formatter = (x) => x) {
