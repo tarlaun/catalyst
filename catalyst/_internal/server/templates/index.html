@@ -1234,7 +1234,14 @@
         state.timings = data.timings || null;
 
         // Lazy cross-dataset derive: a virtual layer joined per tile at serve time.
+        // A follow-up refine on the same dataset must not wipe an active join
+        // (the server echoes it back, but keep a client-side safety net too).
+        const prevDeriveLive = state.deriveLive;
         state.deriveLive = data.derive_live || null;
+        if (!state.deriveLive && prevDeriveLive && data.mode === "followup" &&
+            (data.selected_dataset || state.dataset) === prevDeriveLive.target) {
+            state.deriveLive = prevDeriveLive;
+        }
         if (state.deriveLive) state.layers = [];  // it drives the map, not the overlay stack
 
         // Cross-dataset overlay: either replace the whole stack (initial turn) or
@@ -1427,6 +1434,8 @@
                 current_dataset: state.dataset,
                 current_attributes: state.selectedAttributes,
                 current_style: state.currentStyle,
+                // Active lazy join, so refinements keep styling the joined attribute
+                derive_live: state.deriveLive || undefined,
                 k: 5
             });
 

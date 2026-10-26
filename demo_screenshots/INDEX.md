@@ -26,6 +26,17 @@ typed into the live UI; all succeeded.
 
 | 16 | `16_timing_bar.png` | Show the fire hazard severity zones... | Suggest Style | New stacked timing bar: search 268ms / LLM 10.6s / render 0ms, min-width keeps short stages visible |
 
+| 18 | `18_buildings_fhsz_red_orange_yellow.png` | Color buildings by the fire hazard severity... Also use a red-orange-yellow theme | derive-live + LLM style spec | Severity-ordered theme honored: Very High #bd0026, High #fd8d3c, Moderate yellow |
+| 19 | `19_fhsz_join_refine_followup.png` | (follow-up) Make the Very High buildings a darker red... | followup refine with active join | Join preserved across refine (derive_live echoed); Very High darkened to #800026 |
+
+2026-10-26 join styling robustness: the LLM derive spec can now carry a `style`
+(color_theme + explicit value->color categories for ordinal values); the
+derive-live branch and materialized derive honor it (count/sum/mean derives
+also switched from categorical to gradient rendering). Follow-up turns no
+longer wipe an active derive-live join: the client sends `derive_live` with
+the request, the server augments the dataset summary with the joined
+attribute (so categorical stops aren't empty) and echoes the join back.
+
 2026-10-26 derive-live rewrite: the join now runs inside `fast_tile.generate_tile`
 (`annotate` hook — batched STRtree point-in-polygon on feature bbox centres) instead
 of decoding + re-encoding the finished MVT with the pure-Python codec. Sub-pixel

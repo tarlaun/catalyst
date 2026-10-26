@@ -420,8 +420,60 @@ def create_app(
             logger.exception("[DeriveJob] Failed for spec=%s", spec)
             _set_build_job(job_id, status="failed", step="error", message=str(e))
 
+    def _derive_spec_style(spec: Dict[str, Any]) -> Dict[str, Any]:
+        """Style hints the LLM attached to a derive spec (untrusted LLM output:
+        every color is validated, unknown keys ignored). The spec may carry a
+        color_theme (e.g. the user asked for a red-orange-yellow theme) and/or
+        explicit value->color categories (for ordinal values like severity)."""
+        raw = spec.get("style") if isinstance(spec.get("style"), dict) else {}
+        theme = raw.get("color_theme") if isinstance(raw.get("color_theme"), dict) else {}
+        colors: List[str] = []
+        for c in theme.get("colors") or []:
+            hexc = _normalize_hex_color(str(c), "")
+            if hexc and hexc not in colors:
+                colors.append(hexc)
+        categories: List[Dict[str, str]] = []
+        for item in raw.get("categories") or []:
+            if not isinstance(item, dict):
+                continue
+            value = _normalize_unicode_text(str(item.get("value") or "")).strip()
+            color = _normalize_hex_color(str(item.get("color") or ""), "")
+            if value and color:
+                categories.append({"value": value, "color": color})
+        return {
+            "name": _normalize_unicode_text(str(theme.get("name") or "")).strip() or "category",
+            "colors": colors,
+            "categories": categories,
+            "opacity": _safe_float(raw.get("opacity"), -1.0),
+            "legend_title": _normalize_unicode_text(str(raw.get("legend_title") or "")).strip(),
+        }
+
+    def _apply_spec_categories(style: Dict[str, Any], categories: List[Dict[str, str]]) -> None:
+        """Recolor a normalized categorical style with the spec's explicit
+        value->color mapping. Without this, palette colors are assigned in
+        top-k (frequency) order, which can hand the most severe class the
+        calmest color. Values are matched case-insensitively; the data's own
+        spelling is kept so the MapLibre match expression still hits."""
+        renderer = style.get("renderer") or {}
+        if renderer.get("mode") != "categorical" or not categories:
+            return
+        by_value = {c["value"].lower(): c["color"] for c in categories}
+        merged: List[Dict[str, str]] = []
+        for stop in renderer.get("stops") or []:
+            value = str(stop.get("value", ""))
+            merged.append({"value": value, "color": by_value.get(value.lower()) or stop.get("color")})
+        present = {m["value"].lower() for m in merged}
+        for c in categories:
+            if c["value"].lower() not in present:
+                merged.append(dict(c))
+        renderer["stops"] = merged
+        theme = style.get("color_theme")
+        if isinstance(theme, dict):
+            theme["colors"] = [m["color"] for m in merged]
+
     def _build_derive_response(
-        info: Dict[str, Any], query: str, interaction_id: str, assistant_response: str
+        info: Dict[str, Any], query: str, interaction_id: str, assistant_response: str,
+        spec: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build the chat-style 'derive complete' payload from a finished derive.
 
@@ -433,15 +485,28 @@ def create_app(
         attr = info["output_attribute"]
         d_summary = _dataset_summary_for_llm(derived)
         d_geom = _infer_geometry_kind_from_summary(d_summary)
+        # dominant = categorical classes; count/sum/mean/... = numeric gradient
+        # (a categorical renderer over counts produced a monochrome map).
+        agg = str(info.get("aggregate") or "dominant").strip().lower()
+        kind = "categorical" if agg == "dominant" else "gradient"
+        sstyle = _derive_spec_style(spec or {})
+        if sstyle["colors"]:
+            theme = {"name": sstyle["name"], "colors": sstyle["colors"]}
+        elif kind == "categorical":
+            theme = {"name": "category", "colors": _categorical_palette()}
+        else:
+            theme = {"name": "heat", "colors": ["#fff5eb", "#fdae6b", "#e6550d", "#7f2704"]}
         raw_style = {
             "target_attribute": attr,
-            "style_type": f"{_GEOM_PREFIX.get(d_geom, 'fill')}-categorical",
-            "color_theme": {"name": "category", "colors": _categorical_palette()},
-            "opacity": 0.85, "stroke_width": 1.0, "radius": 4.0,
-            "legend_title": attr.replace("_", " ").title(),
+            "style_type": f"{_GEOM_PREFIX.get(d_geom, 'fill')}-{kind}",
+            "color_theme": theme,
+            "opacity": sstyle["opacity"] if 0.0 < sstyle["opacity"] <= 1.0 else 0.85,
+            "stroke_width": 1.0, "radius": 4.0,
+            "legend_title": sstyle["legend_title"] or attr.replace("_", " ").title(),
             "notes": [f"{info['aggregate']} of {info.get('value_attribute') or 'features'} from {info['source_dataset']}"],
         }
         d_style = _normalize_style_for_client(dataset=derived, dataset_summary=d_summary, style=raw_style)
+        _apply_spec_categories(d_style, sstyle["categories"])
         d_layer = {
             "dataset": derived, "score": 1.0,
             "reason": f"Spatially joined {info['target_dataset']} x {info['source_dataset']} ({info['aggregate']}).",
@@ -474,7 +539,7 @@ def create_app(
             _set_build_job(job_id, status="running", step="joining",
                            message="Combining datasets (spatial join + tiling)...")
             info = _run_derive(spec)
-            payload = _build_derive_response(info, query, interaction_id, assistant_response)
+            payload = _build_derive_response(info, query, interaction_id, assistant_response, spec=spec)
             _set_build_job(job_id, status="completed", step="done",
                            message=f"Derived dataset '{info['dataset']}' is ready.",
                            dataset=info["dataset"], result=payload)
@@ -1390,16 +1455,22 @@ def create_app(
                         if src_attr:
                             syn["attributes"].append(src_attr)
                         geom_kind = _infer_geometry_kind_from_summary(syn)
+                        sstyle = _derive_spec_style(spec)
                         raw_style = {
                             "target_attribute": derive_value,
                             "style_type": f"{_GEOM_PREFIX.get(geom_kind, 'fill')}-categorical",
-                            "color_theme": {"name": "category", "colors": _categorical_palette()},
-                            "opacity": 0.9, "stroke_width": 0.6, "radius": 3.0,
-                            "legend_title": derive_value.replace("_", " ").title(),
+                            "color_theme": {
+                                "name": sstyle["name"],
+                                "colors": sstyle["colors"] or _categorical_palette(),
+                            },
+                            "opacity": sstyle["opacity"] if 0.0 < sstyle["opacity"] <= 1.0 else 0.9,
+                            "stroke_width": 0.6, "radius": 3.0,
+                            "legend_title": sstyle["legend_title"] or derive_value.replace("_", " ").title(),
                         }
                         live_style = _normalize_style_for_client(
                             dataset=derive_target, dataset_summary=syn, style=raw_style,
                         )
+                        _apply_spec_categories(live_style, sstyle["categories"])
                         msg = assistant_response or (
                             f"Coloring {derive_target} by {derive_value.replace('_', ' ')} "
                             f"from {derive_source} — joined live as you pan/zoom."
@@ -1534,6 +1605,7 @@ def create_app(
         current_dataset: str,
         current_attributes: Optional[List[str]] = None,
         current_style: Optional[Dict[str, Any]] = None,
+        derive_live: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], int]:
         if not current_dataset:
             raise ValueError("current_dataset is required for follow-up turns")
@@ -1543,6 +1615,28 @@ def create_app(
         total_t0 = perf_counter()
         normalized_query = _normalize_unicode_text(user_query)
         selected_summary = _dataset_summary_for_llm(current_dataset)
+
+        # Active lazy join (client-reported): refining "color X by <joined attr>"
+        # must keep working — the joined attribute is not in the target dataset's
+        # own summary, so without the source attribute's summary the categorical
+        # stops would come out empty (every feature grey) and the client would
+        # drop the join. Validate it, teach the summary about the attribute, and
+        # echo it back so the client keeps serving /api/derive-live tiles.
+        live_source = live_value = ""
+        if isinstance(derive_live, dict):
+            live_target = _normalize_unicode_text(str(derive_live.get("target") or "")).strip()
+            live_source = _normalize_unicode_text(str(derive_live.get("source") or "")).strip()
+            live_value = _normalize_unicode_text(str(derive_live.get("value_attribute") or "")).strip()
+            if (live_target != current_dataset or not live_source or not live_value
+                    or not _dataset_exists(live_source)):
+                live_source = live_value = ""
+        if live_source:
+            src_attr = _find_attribute_summary(_dataset_summary_for_llm(live_source), live_value)
+            if src_attr:
+                selected_summary = {
+                    **selected_summary,
+                    "attributes": list(selected_summary.get("attributes", [])) + [src_attr],
+                }
 
         llm_t0 = perf_counter()
         try:
@@ -1608,6 +1702,11 @@ def create_app(
             "layers": [followup_layer],
             "merge_layers": True,
             "top_k": [],
+            **({"derive_live": {
+                "target": current_dataset,
+                "source": live_source,
+                "value_attribute": live_value,
+            }} if live_source else {}),
             "timings": {
                 "semantic_search_ms": 0.0,
                 "llm_ms": round(llm_ms, 3),
@@ -2014,12 +2113,14 @@ def create_app(
             if not _dataset_exists(current_dataset):
                 return _json_response({"error": f"Current dataset not found: {current_dataset}"}, 404)
 
+            derive_live_raw = body.get("derive_live")
             response, status = _run_followup_chat_turn(
                 user_query=user_query,
                 interaction_id=interaction_id,
                 current_dataset=current_dataset,
                 current_attributes=current_attributes,
                 current_style=current_style,
+                derive_live=derive_live_raw if isinstance(derive_live_raw, dict) else None,
             )
             return _json_response(response, status)
 

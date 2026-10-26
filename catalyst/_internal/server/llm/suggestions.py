@@ -168,6 +168,17 @@ Instead return a JSON object with:
   - aggregate: "dominant" | "count" | "mean" | "sum"   (dominant = most prominent / area-weighted mode)
   - value_attribute: string (the SOURCE attribute to aggregate; omit/empty for count)
   - output_attribute: string (snake_case name for the new attribute, e.g. "dominant_vegetation")
+  - style (optional but include it whenever the user mentions colors, a theme, or the
+    values are ordinal): how to color the target by the new attribute:
+      - color_theme: {"name": string, "colors": [up to 8 hex strings]} — honor any
+        color/theme words in the user's request (e.g. "red-orange-yellow theme").
+      - categories: [{"value": string, "color": "#RRGGBB"}, ...] — explicit
+        value-to-color mapping using the source attribute's known values. ALWAYS
+        prefer this for ordinal values (severity, risk class, size class): order the
+        intensity to match the meaning, e.g. "Very High" gets the most intense red,
+        "Moderate" the mildest color. Without it, colors are assigned by frequency,
+        which can give a severe class a calm color.
+      - legend_title: string, opacity: number 0..1 (both optional)
 Choose value_attribute from the source dataset's attributes. Use this ONLY for
 genuine combine/join requests; for plain styling or simple overlays return layers.
 
@@ -578,6 +589,7 @@ def start_multilayer_conversation(
                     "aggregate": _clean_text(derive_raw.get("aggregate")) or "dominant",
                     "value_attribute": _clean_text(derive_raw.get("value_attribute")) or None,
                     "output_attribute": _clean_text(derive_raw.get("output_attribute")) or None,
+                    "style": derive_raw.get("style") if isinstance(derive_raw.get("style"), dict) else None,
                 },
             )
         logger.warning("Multilayer: dropping derive spec with non-candidate datasets %r/%r", target, source)
