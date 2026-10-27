@@ -38,12 +38,16 @@ class MultiLayerStyleResult:
 
     If the user asked to COMBINE datasets into a new derived attribute (a spatial
     join + aggregate, e.g. "color parks by their dominant vegetation type"),
-    ``derive`` holds that spec instead of ``layers``.
+    ``derive`` holds that spec instead of ``layers``. ``no_match`` means the model
+    judged that NO candidate actually answers the request (wrong region, wrong
+    subject, or required attribute missing) — the caller should surface the
+    explanation instead of rendering a misleading map.
     """
     assistant_response: str
     layers: List[LayerStyleSpec]
     interaction_id: Optional[str] = None
     derive: Optional[Dict[str, Any]] = None
+    no_match: bool = False
 
 
 @dataclass
@@ -153,6 +157,23 @@ parks that contain them).
 
 Your job: decide which of the candidates are JOINTLY relevant to the request and
 return one styled layer per chosen dataset.
+
+SPECIAL CASE — NO MATCHING DATA (check this FIRST):
+The candidate datasets are the ONLY data that exists; there is no other source.
+Before picking anything, verify the request is actually answerable:
+- GEOGRAPHY: the candidates cover one specific region (their descriptions say
+  which). A request about any other city/region/country (e.g. London, Paris,
+  Tokyo when the data is Los Angeles) CANNOT be answered by them. Semantic
+  similarity will still rank something first — that does not make it an answer.
+- SUBJECT/ATTRIBUTE: the thing to show or the attribute to style by (e.g.
+  "ratings", "cafes") must really exist in a candidate's attribute list. Do not
+  substitute a vaguely-related attribute (e.g. "confidence") for a requested one.
+If the request fails these checks, DO NOT return layers or derive. Return ONLY:
+{"assistant_response": "<1-3 sentences: say plainly that this data lake has no
+data for the request (name what is missing: the region, the subject, or the
+attribute), then name the closest datasets that ARE available>",
+ "no_match": true}
+A truthful "we don't have that data" is always better than a wrong map.
 
 SPECIAL CASE — spatial join / derived attribute:
 If the user asks to color/size one dataset BY A PROPERTY DERIVED FROM ANOTHER
@@ -570,6 +591,16 @@ def start_multilayer_conversation(
 
     parsed = _extract_structured_object(raw.text)
     valid_names = {str(c.get("dataset")) for c in candidates_summary}
+
+    # The model judged that no candidate answers the request (wrong region /
+    # subject / attribute). Surface the explanation instead of forcing a map.
+    if parsed.get("no_match") is True:
+        return MultiLayerStyleResult(
+            assistant_response=_clean_text(parsed.get("assistant_response")),
+            layers=[],
+            interaction_id=raw.interaction_id,
+            no_match=True,
+        )
 
     # Spatial-join / derived-attribute path: only honour it if both datasets are
     # real candidates (don't trust hallucinated names).

@@ -29,6 +29,14 @@ typed into the live UI; all succeeded.
 | 18 | `18_buildings_fhsz_red_orange_yellow.png` | Color buildings by the fire hazard severity... Also use a red-orange-yellow theme | derive-live + LLM style spec | Severity-ordered theme honored: Very High #bd0026, High #fd8d3c, Moderate yellow |
 | 19 | `19_fhsz_join_refine_followup.png` | (follow-up) Make the Very High buildings a darker red... | followup refine with active join | Join preserved across refine (derive_live echoed); Very High darkened to #800026 |
 
+| 22 | `22_no_data_refusal.png` | show cafes in london based on their ratings | no-match path (2026-10-27) | Honest refusal: "no data for London... no 'ratings' attribute"; map/state untouched |
+
+2026-10-27 out-of-scope guard: the multilayer LLM can return `no_match` (wrong
+region / subject / missing attribute -> mode "no_data", nothing rendered), and
+the offline heuristic fallback refuses below CATALYST_MATCH_MIN (0.58) top
+similarity instead of rendering semantic noise. Verified: london-cafes refused
+with an explanation naming what IS available; places/join prompts unaffected.
+
 2026-10-26 join styling robustness: the LLM derive spec can now carry a `style`
 (color_theme + explicit value->color categories for ordinal values); the
 derive-live branch and materialized derive honor it (count/sum/mean derives

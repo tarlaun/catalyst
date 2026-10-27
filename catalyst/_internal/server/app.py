@@ -1332,6 +1332,41 @@ def create_app(
     # beat the current dataset by a margin before we abandon the conversation.
     _PIVOT_CHALLENGER_MIN = float(os.environ.get("CATALYST_PIVOT_CHALLENGER_MIN", "0.62"))
     _PIVOT_MARGIN = float(os.environ.get("CATALYST_PIVOT_MARGIN", "0.03"))
+    # Minimum top-candidate similarity for the NO-LLM (heuristic) path to render
+    # anything at all. Measured on the live gemini-embedding-001 index: genuine
+    # requests score >= 0.62 on their dataset, out-of-scope ones ("cafes in
+    # london", "hotels in paris") top out at 0.50-0.59. The LLM path makes this
+    # call itself (no_match); this floor keeps the offline fallback honest too.
+    _MATCH_MIN = float(os.environ.get("CATALYST_MATCH_MIN", "0.58"))
+
+    def _no_match_response(
+        query: str, message: str, candidate_payload: List[Dict[str, Any]],
+        *, interaction_id: str = "", selection_mode: str = "no-match",
+        semantic_search_ms: float = 0.0, llm_ms: float = 0.0, total_t0: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """An honest "the data lake has no data for this" turn: no dataset is
+        selected and the client leaves the map untouched."""
+        if not message:
+            available = ", ".join(str(c.get("dataset")) for c in candidate_payload[:6])
+            message = (
+                "No dataset in this demo covers that request. The closest available "
+                f"datasets (Los Angeles / Riverside area) are: {available}."
+            )
+        return {
+            "mode": "no_data", "query": query,
+            "interaction_id": interaction_id,
+            "assistant_response": message,
+            "selection_mode": selection_mode,
+            "selected_dataset": "", "selected_attributes": [],
+            "style": None, "layers": [],
+            "top_k": candidate_payload,
+            "timings": {
+                "semantic_search_ms": round(semantic_search_ms, 3),
+                "llm_ms": round(llm_ms, 3),
+                "mvt_render_ms": None,
+                "total_ms": round((perf_counter() - total_t0) * 1000.0, 3) if total_t0 else None,
+            },
+        }
 
     def _looks_like_new_dataset_request(
         user_query: str,
@@ -1429,6 +1464,20 @@ def create_app(
                 max_layers=3,
                 provider_name=_LLM_PROVIDER,
             )
+            # The model judged no candidate answers the request (wrong region,
+            # subject, or attribute): report that instead of rendering the
+            # nearest-but-wrong dataset ("cafes in london" must not quietly
+            # become LA places colored by confidence).
+            if getattr(multi, "no_match", False):
+                return _no_match_response(
+                    normalized_query,
+                    _normalize_unicode_text(multi.assistant_response or "").strip(),
+                    candidate_payload,
+                    interaction_id=_normalize_unicode_text(multi.interaction_id),
+                    semantic_search_ms=semantic_search_ms,
+                    llm_ms=(perf_counter() - llm_t0) * 1000.0,
+                    total_t0=total_t0,
+                ), 200
             # Spatial-join / derived-attribute request: building+tiling a new
             # dataset can take minutes for large targets, so run it as a
             # background job (the client polls GET /api/upload-dataset/<job_id>)
@@ -1560,6 +1609,16 @@ def create_app(
                 exc,
             )
             selection_mode = "heuristic"
+            # No LLM to judge fitness, so gate on similarity: below the floor the
+            # best "match" is semantic noise, and an honest refusal beats a wrong map.
+            top_score = float(candidates[0].score) if candidates else 0.0
+            if top_score < _MATCH_MIN:
+                return _no_match_response(
+                    normalized_query, "", candidate_payload,
+                    selection_mode="no-match-heuristic",
+                    semantic_search_ms=semantic_search_ms,
+                    total_t0=total_t0,
+                ), 200
             layers = _heuristic_overlay_layers(normalized_query, candidates, max_layers=3)
             names = ", ".join(l["dataset"] for l in layers)
             if len(layers) > 1:
@@ -2350,10 +2409,11 @@ def create_app(
                 initial_response, initial_status = _run_initial_chat_turn(user_query=user_query, k=k)
                 bootstrap_ms = (perf_counter() - initial_t0) * 1000.0
 
-                # The bootstrap decided a materialized derive is needed: code
-                # cannot be generated against a dataset that is still building,
-                # so hand the derive job straight to the client to poll.
-                if initial_response.get("mode") == "deriving":
+                # The bootstrap decided a materialized derive is needed (code
+                # cannot be generated against a dataset that is still building)
+                # or found no data for the request: hand that answer straight
+                # to the client instead of generating code against nothing.
+                if initial_response.get("mode") in ("deriving", "no_data"):
                     return _json_response(initial_response, initial_status)
 
                 current_dataset = _normalize_unicode_text(initial_response.get("selected_dataset", "")).strip()
