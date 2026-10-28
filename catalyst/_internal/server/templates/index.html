@@ -243,6 +243,82 @@
             color: var(--text);
         }
 
+        .mode-toggle {
+            display: flex;
+            gap: 4px;
+            background: #0b1125;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 4px;
+        }
+
+        .mode-toggle button {
+            flex: 1 1 0;
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--muted);
+            font-weight: 800;
+            font-size: 13px;
+            padding: 8px 10px;
+            border-radius: 9px;
+        }
+
+        .mode-toggle button:hover {
+            color: var(--text);
+            opacity: 1;
+        }
+
+        .mode-toggle button.active {
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            color: #07101f;
+        }
+
+        .mode-toggle button .mode-sub {
+            display: block;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            opacity: 0.8;
+            margin-top: 2px;
+        }
+
+        .mode-section {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .browse-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 10px;
+            max-height: 420px;
+            overflow-y: auto;
+        }
+
+        .browse-item {
+            background: #0e152e;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 10px 12px;
+            cursor: pointer;
+        }
+
+        .browse-item:hover {
+            border-color: var(--accent);
+        }
+
+        .browse-item.active {
+            border-color: var(--accent);
+            box-shadow: inset 0 0 0 1px var(--accent);
+        }
+
+        .browse-item-name {
+            font-weight: 700;
+            font-size: 13px;
+        }
+
         .meta-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -578,15 +654,24 @@
         <section class="card">
             <h1 class="title">CATALYST</h1>
             <p class="subtitle">Geospatial Data Exploration Styling</p>
+
+            <div class="mode-toggle" id="appModeToggle" style="margin-top:12px;">
+                <button type="button" data-mode="explore" class="active">
+                    Explore
+                    <span class="mode-sub">ask in plain language</span>
+                </button>
+                <button type="button" data-mode="browse">
+                    Browse
+                    <span class="mode-sub">view raw datasets</span>
+                </button>
+            </div>
+            <div class="hint" id="modeHint">
+                Describe what you want to see — Catalyst finds the right dataset(s) and styles the map.
+                No need to pick a dataset first.
+            </div>
         </section>
 
-        <section class="card">
-            <label for="datasetSelect">Available datasets</label>
-            <select id="datasetSelect">
-                <option value="">Loading datasets...</option>
-            </select>
-        </section>
-
+        <div class="mode-section" id="exploreSection">
         <section class="card">
             <label for="promptExamples">Try an example</label>
             <select id="promptExamples">
@@ -603,7 +688,7 @@
                     <option>Count the earthquakes in each fire hazard zone and color the zones by that count.</option>
                     <option>Visualize parks, highways and intersections in Riverside together on one map.</option>
                 </optgroup>
-                <optgroup label="Interactive maps — use “Generate Map Code”, then “Run in Map”">
+                <optgroup id="codeExampleGroup" label="Interactive maps — Advanced mode (generates code)">
                     <option>Color each vegetation type differently and use opacity so large areas stand out while small patches fade (log scale on acreage).</option>
                     <option>Let me click a vegetation area to fade out all other polygons and show a popup with its vegetation type and acreage.</option>
                     <option>Classify vegetation patches into five acreage quantile classes computed from the features on screen.</option>
@@ -614,9 +699,21 @@
             <label for="promptBox" style="margin-top:10px;">Prompt</label>
             <textarea id="promptBox" placeholder="Example: Color Riverside by vegetation type."></textarea>
 
+            <label style="margin-top:10px;">Assistant mode</label>
+            <div class="mode-toggle" id="skillModeToggle">
+                <button type="button" data-skill="basic" class="active">
+                    Basic
+                    <span class="mode-sub">styled map from a prompt</span>
+                </button>
+                <button type="button" data-skill="advanced">
+                    Advanced
+                    <span class="mode-sub">+ editable map code</span>
+                </button>
+            </div>
+
             <div class="row" style="margin-top: 10px;">
                 <button id="styleBtn">Suggest Style</button>
-                <button id="codeBtn" class="secondary">Generate Map Code</button>
+                <button id="codeBtn" class="secondary" style="display:none;">Generate Map Code</button>
             </div>
 
             <div class="status-grid" style="margin-top: 10px;">
@@ -624,9 +721,8 @@
                 <div class="pill">Interaction: <strong id="interactionLabel">None</strong></div>
             </div>
 
-            <div class="hint">
-                “Suggest Style” returns a structured map style. “Generate Map Code” writes editable JavaScript
-                that runs on the map.
+            <div class="hint" id="promptHint">
+                “Suggest Style” picks the best dataset(s) for your prompt and styles the map directly.
             </div>
         </section>
 
@@ -635,7 +731,7 @@
             <div id="assistantBox" class="assistant-box">No response yet.</div>
         </section>
 
-        <details class="card" id="codeDetails">
+        <details class="card" id="codeDetails" style="display:none;">
             <summary><span class="section-title">Generated Map Script</span></summary>
 
             <textarea id="codeBox" class="code-box" spellcheck="false" placeholder="// LLM-generated code will appear here."></textarea>
@@ -656,6 +752,19 @@
         <section class="card">
             <h2 class="section-title">Active Map Layers <span id="overlayBadge" class="chip" style="display:none;"></span></h2>
             <div id="layersPanel" class="small">No layers yet.</div>
+        </section>
+        </div> <!-- /exploreSection -->
+
+        <section class="card" id="browseCard" style="display:none;">
+            <h2 class="section-title">Datasets</h2>
+            <p class="subtitle">Click a dataset to preview its raw geometry on the map — no styling, no LLM.</p>
+            <!-- Kept for state plumbing (set by chat responses); the list below is the visible picker. -->
+            <select id="datasetSelect" style="display:none;">
+                <option value="">Loading datasets...</option>
+            </select>
+            <div class="browse-list" id="browseList">
+                <div class="small">Loading datasets…</div>
+            </div>
         </section>
 
         <details class="card" id="summaryDetails">
@@ -696,7 +805,7 @@
             </div>
         </details>
 
-        <details class="card">
+        <details class="card" id="timingsDetails">
             <summary><span class="section-title">Behind the Scenes: Retrieval &amp; Timings</span></summary>
 
             <div class="table-wrap">
@@ -734,7 +843,7 @@
         </details>
 
         {% if allow_uploads %}
-        <details class="card">
+        <details class="card" id="uploadDetails" style="display:none;">
             <summary><span class="section-title">Upload + Build Dataset</span></summary>
 
             <p class="subtitle" style="margin-bottom:12px;">
@@ -866,8 +975,91 @@
         timingLegend: document.getElementById("timingLegend"),
         timingTotalMs: document.getElementById("timingTotalMs"),
         layersPanel: document.getElementById("layersPanel"),
-        overlayBadge: document.getElementById("overlayBadge")
+        overlayBadge: document.getElementById("overlayBadge"),
+        appModeToggle: document.getElementById("appModeToggle"),
+        skillModeToggle: document.getElementById("skillModeToggle"),
+        modeHint: document.getElementById("modeHint"),
+        promptHint: document.getElementById("promptHint"),
+        exploreSection: document.getElementById("exploreSection"),
+        browseCard: document.getElementById("browseCard"),
+        browseList: document.getElementById("browseList"),
+        timingsDetails: document.getElementById("timingsDetails"),
+        uploadDetails: document.getElementById("uploadDetails")
     };
+
+    // UI modes. App mode separates "prompt the assistant" (explore, the default)
+    // from "just look at the raw datasets" (browse). Skill mode gates the
+    // code-generation surface: basic = structured styles only, advanced also
+    // exposes "Generate Map Code" + the editable script panel.
+    const uiMode = { app: "explore", skill: "basic" };
+
+    function setAppMode(mode) {
+        uiMode.app = mode === "browse" ? "browse" : "explore";
+        const explore = uiMode.app === "explore";
+        els.appModeToggle.querySelectorAll("button").forEach(btn => {
+            btn.classList.toggle("active", btn.dataset.mode === uiMode.app);
+        });
+        els.exploreSection.style.display = explore ? "" : "none";
+        els.browseCard.style.display = explore ? "none" : "";
+        if (els.timingsDetails) els.timingsDetails.style.display = explore ? "" : "none";
+        if (els.uploadDetails) els.uploadDetails.style.display = explore ? "none" : "";
+        els.modeHint.textContent = explore
+            ? "Describe what you want to see — Catalyst finds the right dataset(s) and styles the map. No need to pick a dataset first."
+            : "Pick a dataset to preview its raw geometry. Switch back to Explore to style it with a prompt.";
+        if (!explore) renderBrowseList();
+    }
+
+    function setSkillMode(mode) {
+        uiMode.skill = mode === "advanced" ? "advanced" : "basic";
+        const advanced = uiMode.skill === "advanced";
+        els.skillModeToggle.querySelectorAll("button").forEach(btn => {
+            btn.classList.toggle("active", btn.dataset.skill === uiMode.skill);
+        });
+        els.codeBtn.style.display = advanced ? "" : "none";
+        els.codeDetails.style.display = advanced ? "" : "none";
+        els.promptHint.textContent = advanced
+            ? "“Suggest Style” styles the map directly. “Generate Map Code” writes editable JavaScript — review it below, then press “Run in Map”."
+            : "“Suggest Style” picks the best dataset(s) for your prompt and styles the map directly.";
+    }
+
+    function renderBrowseList() {
+        const datasets = Array.isArray(state.datasetsCatalog) ? state.datasetsCatalog : [];
+        if (!datasets.length) {
+            els.browseList.innerHTML = `<div class="small">No datasets found.</div>`;
+            return;
+        }
+        els.browseList.innerHTML = datasets.map(item => {
+            const geoms = Array.isArray(item.geometry_types) && item.geometry_types.length
+                ? [...new Set(item.geometry_types)].join(", ") : "";
+            const bits = [];
+            if (geoms) bits.push(geoms);
+            if (item.attribute_count != null) bits.push(`${item.attribute_count} attributes`);
+            if (item.size_human) bits.push(item.size_human);
+            const active = item.id === state.dataset ? " active" : "";
+            return `
+              <div class="browse-item${active}" role="button" tabindex="0" data-dataset="${escapeHtml(item.id)}">
+                <div class="browse-item-name">${escapeHtml(item.name || item.id)}</div>
+                <span class="small">${escapeHtml(item.id)}${bits.length ? " · " + escapeHtml(bits.join(" · ")) : ""}</span>
+              </div>`;
+        }).join("");
+    }
+
+    async function browseDataset(dataset) {
+        if (!dataset) return;
+        // Browsing is a fresh look at one dataset: drop the ongoing conversation,
+        // styles and joins so the map shows plain unstyled geometry.
+        state.dataset = dataset;
+        state.interactionId = "";
+        state.selectedAttributes = [];
+        state.currentStyle = null;
+        state.deriveLive = null;
+        state.layers = [];
+        els.datasetSelect.value = dataset;
+        renderBrowseList();
+        updateStatus();
+        applyStateToMap();
+        await inspectDataset(dataset);
+    }
 
     let mapFrameReady = false;
     let currentUploadJobId = "";
@@ -1306,8 +1498,10 @@
             } else if (state.dataset) {
                 els.datasetSelect.value = state.dataset;
             }
+            renderBrowseList();
         } catch (err) {
             els.datasetSelect.innerHTML = `<option value="">Failed to load datasets</option>`;
+            els.browseList.innerHTML = `<div class="small">Failed to load datasets.</div>`;
         }
     }
 
@@ -1618,21 +1812,40 @@
         state.currentStyle = null;
         state.deriveLive = null;
         state.layers = [];
+        // Interactive examples need code generation — flip to Advanced for them.
+        const opt = promptExamples.selectedOptions && promptExamples.selectedOptions[0];
+        if (opt && opt.parentElement && opt.parentElement.id === "codeExampleGroup") {
+            setSkillMode("advanced");
+        }
         updateStatus();
         els.promptBox.focus();
     });
 
-    els.datasetSelect.addEventListener("change", async () => {
-        const dataset = els.datasetSelect.value || "";
-        if (!dataset) return;
-        state.dataset = dataset;
-        state.interactionId = "";
-        state.selectedAttributes = [];
-        state.currentStyle = null;
-        state.layers = [];
-        updateStatus();
-        applyStateToMap();
-        await inspectDataset(dataset);
+    els.datasetSelect.addEventListener("change", () => {
+        browseDataset(els.datasetSelect.value || "");
+    });
+
+    els.appModeToggle.addEventListener("click", (event) => {
+        const btn = event.target.closest("button[data-mode]");
+        if (btn) setAppMode(btn.dataset.mode);
+    });
+
+    els.skillModeToggle.addEventListener("click", (event) => {
+        const btn = event.target.closest("button[data-skill]");
+        if (btn) setSkillMode(btn.dataset.skill);
+    });
+
+    els.browseList.addEventListener("click", (event) => {
+        const item = event.target.closest(".browse-item[data-dataset]");
+        if (item) browseDataset(item.dataset.dataset);
+    });
+    els.browseList.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const item = event.target.closest(".browse-item[data-dataset]");
+        if (item) {
+            event.preventDefault();
+            browseDataset(item.dataset.dataset);
+        }
     });
 
     els.promptBox.addEventListener("keydown", (event) => {
@@ -1728,6 +1941,8 @@
     })();
 
     async function initialize() {
+        setAppMode("explore");
+        setSkillMode("basic");
         updateStatus();
         renderMetadata();
         await loadDatasetsCatalog();

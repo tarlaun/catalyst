@@ -1333,11 +1333,20 @@ def create_app(
     _PIVOT_CHALLENGER_MIN = float(os.environ.get("CATALYST_PIVOT_CHALLENGER_MIN", "0.62"))
     _PIVOT_MARGIN = float(os.environ.get("CATALYST_PIVOT_MARGIN", "0.03"))
     # Minimum top-candidate similarity for the NO-LLM (heuristic) path to render
-    # anything at all. Measured on the live gemini-embedding-001 index: genuine
-    # requests score >= 0.62 on their dataset, out-of-scope ones ("cafes in
-    # london", "hotels in paris") top out at 0.50-0.59. The LLM path makes this
-    # call itself (no_match); this floor keeps the offline fallback honest too.
-    _MATCH_MIN = float(os.environ.get("CATALYST_MATCH_MIN", "0.58"))
+    # anything at all. The LLM path makes this call itself (no_match); this
+    # floor keeps the offline fallback honest too. Scores are embedder-specific:
+    # on gemini-embedding-001 genuine requests score >= 0.62 and out-of-scope
+    # ones ("cafes in london", "hotels in paris") top out at 0.50-0.59; on the
+    # offline local-hash embedder genuine requests score ~0.17-0.19 and
+    # out-of-scope ones ~0.07-0.11 — so the default floor must follow the
+    # active embedder, or the no-key demo would refuse everything.
+    _MATCH_MIN_ENV = os.environ.get("CATALYST_MATCH_MIN")
+
+    def _match_min(router: CatalogRouter) -> float:
+        if _MATCH_MIN_ENV:
+            return float(_MATCH_MIN_ENV)
+        embedder_id = str(getattr(getattr(router, "embedder", None), "embedder_id", "") or "")
+        return 0.12 if embedder_id.startswith("local-hash") else 0.58
 
     def _no_match_response(
         query: str, message: str, candidate_payload: List[Dict[str, Any]],
@@ -1612,7 +1621,7 @@ def create_app(
             # No LLM to judge fitness, so gate on similarity: below the floor the
             # best "match" is semantic noise, and an honest refusal beats a wrong map.
             top_score = float(candidates[0].score) if candidates else 0.0
-            if top_score < _MATCH_MIN:
+            if top_score < _match_min(router):
                 return _no_match_response(
                     normalized_query, "", candidate_payload,
                     selection_mode="no-match-heuristic",
