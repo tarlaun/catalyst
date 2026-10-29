@@ -983,7 +983,7 @@
         exploreSection: document.getElementById("exploreSection"),
         browseCard: document.getElementById("browseCard"),
         browseList: document.getElementById("browseList"),
-        timingsDetails: document.getElementById("timingsDetails"),
+        summaryDetails: document.getElementById("summaryDetails"),
         uploadDetails: document.getElementById("uploadDetails")
     };
 
@@ -1001,7 +1001,6 @@
         });
         els.exploreSection.style.display = explore ? "" : "none";
         els.browseCard.style.display = explore ? "none" : "";
-        if (els.timingsDetails) els.timingsDetails.style.display = explore ? "" : "none";
         if (els.uploadDetails) els.uploadDetails.style.display = explore ? "none" : "";
         els.modeHint.textContent = explore
             ? "Describe what you want to see — Catalyst finds the right dataset(s) and styles the map. No need to pick a dataset first."
@@ -1059,6 +1058,8 @@
         updateStatus();
         applyStateToMap();
         await inspectDataset(dataset);
+        // Browsing is about the data itself — surface its metadata right away.
+        if (els.summaryDetails) els.summaryDetails.open = true;
     }
 
     let mapFrameReady = false;
