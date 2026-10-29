@@ -203,10 +203,14 @@
             white-space: nowrap;
         }
 
+        /* Styled as a spoken message (accent bar, tinted), NOT like an input
+           field — the prompt textarea sits right above it and users otherwise
+           read this as editable. */
         .assistant-box {
-            background: #0b1125;
-            border: 1px solid var(--border);
-            border-radius: 14px;
+            background: linear-gradient(135deg, rgba(106, 166, 255, 0.10), rgba(134, 225, 255, 0.04));
+            border: 1px solid rgba(106, 166, 255, 0.28);
+            border-left: 3px solid var(--accent);
+            border-radius: 4px 14px 14px 4px;
             padding: 12px;
             font-size: 13px;
             color: #dbe7ff;
@@ -273,13 +277,97 @@
             color: #07101f;
         }
 
-        .mode-toggle button .mode-sub {
-            display: block;
-            font-size: 10px;
-            font-weight: 600;
-            letter-spacing: 0.02em;
-            opacity: 0.8;
-            margin-top: 2px;
+        .help-btn {
+            flex: 0 0 auto;
+            width: 18px;
+            height: 18px;
+            padding: 0;
+            border-radius: 50%;
+            background: var(--chip);
+            border: 1px solid var(--border);
+            color: var(--muted);
+            font-size: 11px;
+            font-weight: 800;
+            line-height: 1;
+        }
+
+        .help-btn:hover {
+            color: var(--text);
+            border-color: var(--accent);
+        }
+
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 50;
+            background: rgba(4, 7, 18, 0.66);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+
+        .modal {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            box-shadow: var(--shadow);
+            padding: 18px;
+            max-width: 560px;
+            width: 100%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .modal-header h3 {
+            margin: 0;
+            font-size: 16px;
+        }
+
+        .modal-close {
+            flex: 0 0 auto;
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            border-radius: 10px;
+            padding: 4px 10px;
+        }
+
+        .modal-section {
+            background: #0e152e;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 12px;
+            margin-top: 10px;
+        }
+
+        .modal-section h4 {
+            margin: 0 0 6px 0;
+            font-size: 13px;
+        }
+
+        .modal-section p, .modal-section ul {
+            margin: 0;
+            font-size: 12.5px;
+            color: var(--muted);
+            line-height: 1.55;
+        }
+
+        .modal-section ul {
+            padding-left: 18px;
+            margin-top: 6px;
+        }
+
+        .modal-section li {
+            margin-top: 3px;
         }
 
         .mode-section {
@@ -656,14 +744,8 @@
             <p class="subtitle">Geospatial Data Exploration Styling</p>
 
             <div class="mode-toggle" id="appModeToggle" style="margin-top:12px;">
-                <button type="button" data-mode="explore" class="active">
-                    Explore
-                    <span class="mode-sub">ask in plain language</span>
-                </button>
-                <button type="button" data-mode="browse">
-                    Browse
-                    <span class="mode-sub">view raw datasets</span>
-                </button>
+                <button type="button" data-mode="explore" class="active">Explore</button>
+                <button type="button" data-mode="browse">Browse</button>
             </div>
             <div class="hint" id="modeHint">
                 Describe what you want to see — Catalyst finds the right dataset(s) and styles the map.
@@ -676,7 +758,7 @@
             <label for="promptExamples">Try an example</label>
             <select id="promptExamples">
                 <option value="">Choose an example prompt…</option>
-                <optgroup label="Style one dataset — use “Suggest Style”">
+                <optgroup label="Style one dataset">
                     <option>Color the Riverside vegetation map by vegetation type, one distinct color per type.</option>
                     <option>Show the fire hazard severity zones, colored from moderate to very high risk.</option>
                     <option>Color Riverside highways by their highway type (interstate, ramp, US highway).</option>
@@ -699,20 +781,19 @@
             <label for="promptBox" style="margin-top:10px;">Prompt</label>
             <textarea id="promptBox" placeholder="Example: Color Riverside by vegetation type."></textarea>
 
-            <label style="margin-top:10px;">Assistant mode</label>
+            <label style="margin-top:10px; display:flex; align-items:center; gap:6px;">
+                Assistant mode
+                <button type="button" id="skillHelpBtn" class="help-btn"
+                        title="What do Basic and Advanced do?"
+                        aria-label="What do Basic and Advanced do?">?</button>
+            </label>
             <div class="mode-toggle" id="skillModeToggle">
-                <button type="button" data-skill="basic" class="active">
-                    Basic
-                    <span class="mode-sub">styled map from a prompt</span>
-                </button>
-                <button type="button" data-skill="advanced">
-                    Advanced
-                    <span class="mode-sub">+ editable map code</span>
-                </button>
+                <button type="button" data-skill="basic" class="active">Basic</button>
+                <button type="button" data-skill="advanced">Advanced</button>
             </div>
 
             <div class="row" style="margin-top: 10px;">
-                <button id="styleBtn">Suggest Style</button>
+                <button id="styleBtn">Generate Style</button>
                 <button id="codeBtn" class="secondary" style="display:none;">Generate Map Code</button>
             </div>
 
@@ -722,7 +803,7 @@
             </div>
 
             <div class="hint" id="promptHint">
-                “Suggest Style” picks the best dataset(s) for your prompt and styles the map directly.
+                “Generate Style” picks the best dataset(s) for your prompt and styles the map directly.
             </div>
         </section>
 
@@ -920,6 +1001,48 @@
     </main>
 </div>
 
+<div class="modal-backdrop" id="skillHelpModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="skillHelpTitle">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="skillHelpTitle">Basic vs. Advanced</h3>
+            <button type="button" class="modal-close" id="skillHelpClose" aria-label="Close">✕</button>
+        </div>
+
+        <div class="modal-section">
+            <h4>Basic — one button, a finished map</h4>
+            <p>
+                “Generate Style” sends your prompt to Catalyst, which picks the best dataset(s),
+                asks the LLM for a map style, and applies it immediately. Nothing to run or review.
+            </p>
+            <ul>
+                <li>Color the Riverside vegetation map by vegetation type.</li>
+                <li>Show fire hazard zones and buildings together on one map.</li>
+                <li>Color buildings by the fire hazard severity of the zone they fall in. <em>(spatial join)</em></li>
+            </ul>
+        </div>
+
+        <div class="modal-section">
+            <h4>Advanced — adds “Generate Map Code”</h4>
+            <p>
+                Everything Basic does, plus a second button that writes editable JavaScript
+                against the sandboxed map runtime. The code appears in the “Generated Map Script”
+                panel — review or edit it, then press “Run in Map”. Use it when the map should
+                <em>do</em> something, not just look a certain way.
+            </p>
+            <ul>
+                <li>Let me click a vegetation area to fade out all others and show a popup with its acreage.</li>
+                <li>Classify vegetation patches into five acreage quantile classes computed from the features on screen.</li>
+                <li>Color parks by acreage on a logarithmic scale.</li>
+            </ul>
+        </div>
+
+        <p class="hint" style="margin-top:12px;">
+            You can switch modes at any time — picking an “Interactive maps” example switches to
+            Advanced automatically.
+        </p>
+    </div>
+</div>
+
 <script>
     // Path prefix the app is mounted under ("/catalyst" on the public site, "" on
     // the dev box). Derived from the served URL so every API/tile/map URL works
@@ -1017,8 +1140,8 @@
         els.codeBtn.style.display = advanced ? "" : "none";
         els.codeDetails.style.display = advanced ? "" : "none";
         els.promptHint.textContent = advanced
-            ? "“Suggest Style” styles the map directly. “Generate Map Code” writes editable JavaScript — review it below, then press “Run in Map”."
-            : "“Suggest Style” picks the best dataset(s) for your prompt and styles the map directly.";
+            ? "“Generate Style” styles the map directly. “Generate Map Code” writes editable JavaScript — review it below, then press “Run in Map”."
+            : "“Generate Style” picks the best dataset(s) for your prompt and styles the map directly.";
     }
 
     function renderBrowseList() {
@@ -1675,7 +1798,7 @@
             updateStatus();
         } finally {
             els.styleBtn.disabled = false;
-            els.styleBtn.textContent = "Suggest Style";
+            els.styleBtn.textContent = "Generate Style";
         }
     }
 
@@ -1840,6 +1963,20 @@
         const item = event.target.closest(".browse-item[data-dataset]");
         if (item) browseDataset(item.dataset.dataset);
     });
+    const skillHelpModal = document.getElementById("skillHelpModal");
+    document.getElementById("skillHelpBtn").addEventListener("click", () => {
+        skillHelpModal.style.display = "flex";
+    });
+    document.getElementById("skillHelpClose").addEventListener("click", () => {
+        skillHelpModal.style.display = "none";
+    });
+    skillHelpModal.addEventListener("click", (event) => {
+        if (event.target === skillHelpModal) skillHelpModal.style.display = "none";
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") skillHelpModal.style.display = "none";
+    });
+
     els.browseList.addEventListener("keydown", (event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
         const item = event.target.closest(".browse-item[data-dataset]");
