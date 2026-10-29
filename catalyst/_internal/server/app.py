@@ -2393,10 +2393,16 @@ def create_app(
                     or not _dataset_exists(code_join_source)):
                 code_join_source = code_join_value = ""
 
+        # The client sets lock_dataset after it has just finished a derive job
+        # for this very prompt: the pivot check must not re-route (derived
+        # datasets are absent from the catalog index, so a challenger always
+        # wins and the same derive would run again — an infinite loop).
+        lock_dataset = bool(body.get("lock_dataset")) and bool(current_dataset)
+
         # Same pivot rule as chat-style: if the prompt clearly targets a different
         # dataset than the ongoing conversation, re-route instead of generating
         # code against the stale one.
-        if current_dataset and _looks_like_new_dataset_request(
+        if current_dataset and not lock_dataset and _looks_like_new_dataset_request(
             user_query=user_query,
             current_dataset=current_dataset,
             current_style=current_style,

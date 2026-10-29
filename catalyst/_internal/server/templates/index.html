@@ -1849,7 +1849,7 @@
         throw new Error("Derive timed out after ~20 minutes");
     }
 
-    async function generateMapCode() {
+    async function generateMapCode(lockDataset = false) {
         const query = els.promptBox.value.trim();
         if (!query) return;
 
@@ -1870,8 +1870,26 @@
                 current_style: state.currentStyle,
                 // Active lazy join: code must be generated against the joined layer
                 derive_live: state.deriveLive || undefined,
+                // After a derive, pin the derived dataset: the server's pivot
+                // check can't see derived datasets and would re-derive forever.
+                lock_dataset: lockDataset || undefined,
                 k: 5
             });
+
+            // Cross-dataset "combine" prompts (count/sum/mean joins) first build
+            // the derived dataset in a background job — same 202 the style path
+            // gets. Poll it, render the derived result, then generate the code
+            // against the now-selected derived dataset (locked, exactly once).
+            if (data && (data.selection_mode === "deriving" || data.derive_job_id)) {
+                if (lockDataset) throw new Error("Derive loop detected — dataset lock was ignored");
+                if (data.interaction_id) state.interactionId = data.interaction_id;
+                state.lastAssistantResponse = data.assistant_response ||
+                    "Combining datasets… this can take a minute for large datasets.";
+                updateStatus();
+                await pollDeriveJob(data.derive_job_id);
+                if (state.dataset) await generateMapCode(true);
+                return;
+            }
 
             syncFromResponse(data);
 
@@ -1930,7 +1948,7 @@
     // button was removed from the UI (styles auto-apply after every chat turn).
     if (els.uploadBuildBtn) els.uploadBuildBtn.addEventListener("click", uploadAndBuildDataset);
     els.styleBtn.addEventListener("click", suggestStyle);
-    els.codeBtn.addEventListener("click", generateMapCode);
+    els.codeBtn.addEventListener("click", () => generateMapCode());
     els.runBtn.addEventListener("click", runCode);
     els.resetBtn.addEventListener("click", resetMap);
     if (els.applyStateBtn) els.applyStateBtn.addEventListener("click", applyStateToMap);
