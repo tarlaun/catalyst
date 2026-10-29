@@ -112,7 +112,15 @@
             color: var(--text);
             padding: 11px 12px;
             font: inherit;
+            /* Without this, controls inherit the 16px browser default while the
+               rest of the sidebar runs at 12-13px — Chrome renders the <option>
+               popup at the control's size, so the dropdown looked huge. */
+            font-size: 13px;
             outline: none;
+        }
+
+        option, optgroup {
+            font-size: 13px;
         }
 
         textarea {
