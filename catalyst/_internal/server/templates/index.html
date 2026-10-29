@@ -794,7 +794,7 @@
 
             <div class="row" style="margin-top: 10px;">
                 <button id="styleBtn">Generate Style</button>
-                <button id="codeBtn" class="secondary" style="display:none;">Generate Map Code</button>
+                <button id="codeBtn" style="display:none;">Generate Map Code</button>
             </div>
 
             <div class="status-grid" style="margin-top: 10px;">
@@ -1022,12 +1022,13 @@
         </div>
 
         <div class="modal-section">
-            <h4>Advanced — adds “Generate Map Code”</h4>
+            <h4>Advanced — “Generate Map Code”</h4>
             <p>
-                Everything Basic does, plus a second button that writes editable JavaScript
-                against the sandboxed map runtime. The code appears in the “Generated Map Script”
-                panel — review or edit it, then press “Run in Map”. Use it when the map should
-                <em>do</em> something, not just look a certain way.
+                The button becomes “Generate Map Code”: it still styles the map, but also writes
+                editable JavaScript against the sandboxed map runtime. The code appears in the
+                “Generated Map Script” panel — review or edit it, then press “Run in Map” to
+                activate the behavior. Use it when the map should <em>do</em> something, not just
+                look a certain way.
             </p>
             <ul>
                 <li>Let me click a vegetation area to fade out all others and show a popup with its acreage.</li>
@@ -1137,10 +1138,13 @@
         els.skillModeToggle.querySelectorAll("button").forEach(btn => {
             btn.classList.toggle("active", btn.dataset.skill === uiMode.skill);
         });
+        // One primary action per mode: Basic styles directly, Advanced generates
+        // code (which also styles the map) — never both buttons at once.
+        els.styleBtn.style.display = advanced ? "none" : "";
         els.codeBtn.style.display = advanced ? "" : "none";
         els.codeDetails.style.display = advanced ? "" : "none";
         els.promptHint.textContent = advanced
-            ? "“Generate Style” styles the map directly. “Generate Map Code” writes editable JavaScript — review it below, then press “Run in Map”."
+            ? "“Generate Map Code” styles the map and writes editable JavaScript — review it below, then press “Run in Map” to activate the behavior."
             : "“Generate Style” picks the best dataset(s) for your prompt and styles the map directly.";
     }
 
@@ -1988,7 +1992,9 @@
 
     els.promptBox.addEventListener("keydown", (event) => {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-            suggestStyle();
+            // Trigger whichever action the current assistant mode exposes.
+            if (uiMode.skill === "advanced") generateMapCode();
+            else suggestStyle();
         }
     });
 
