@@ -17,22 +17,8 @@ _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 
 
-def _ssl_context() -> Optional[ssl.SSLContext]:
-    """SSL context backed by certifi's CA bundle.
-
-    Stock macOS python.org builds ship without system CA certificates, so
-    urllib's default HTTPS verification fails against Google's API. Prefer
-    certifi (a hard dependency of common stacks) and fall back to the platform
-    default if it is unavailable.
-    """
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        try:
-            return ssl.create_default_context()
-        except Exception:
-            return None
+from ._http import ssl_context as _ssl_context  # noqa: E402  (kept under its old name)
+from .credentials import LOCAL_INTERACTION_PREFIX  # noqa: E402
 
 
 class GeminiProvider(LLMProvider):
@@ -42,14 +28,14 @@ class GeminiProvider(LLMProvider):
     by passing `previous_interaction_id`.
     """
 
-    def __init__(self, model: str = _DEFAULT_MODEL):
-        self._api_key = os.environ.get(_ENV_KEY)
+    def __init__(self, model: Optional[str] = None, api_key: Optional[str] = None):
+        self._api_key = api_key or os.environ.get(_ENV_KEY)
         if not self._api_key:
             raise LLMProviderError(
-                f"Environment variable {_ENV_KEY} is not set. "
+                f"No Gemini API key: add your own key in the UI or set {_ENV_KEY}. "
                 "Obtain a key at https://aistudio.google.com/apikey"
             )
-        self._model = model
+        self._model = model or _DEFAULT_MODEL
 
     def generate_response(
         self,
@@ -64,7 +50,8 @@ class GeminiProvider(LLMProvider):
             "input": prompt,
         }
 
-        if previous_interaction_id:
+        # Ids minted by the stateless providers mean nothing to Gemini.
+        if previous_interaction_id and not previous_interaction_id.startswith(LOCAL_INTERACTION_PREFIX):
             payload["previous_interaction_id"] = previous_interaction_id
 
         if system_instruction:
@@ -155,3 +142,22 @@ class GeminiProvider(LLMProvider):
         raise LLMProviderError(
             "Could not parse Gemini Interactions response text."
         )
+
+
+def list_models(api_key: str) -> List[str]:
+    """Text-generation model ids visible to ``api_key`` (also validates the key)."""
+    from ._http import request_json
+    data = request_json(
+        "Gemini", "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+        headers={"x-goog-api-key": api_key}, timeout=30,
+    )
+    skip = ("embedding", "aqa", "imagen", "veo", "tts", "audio", "image", "live", "robotics", "computer-use")
+    ids = []
+    for m in data.get("models") or []:
+        if not isinstance(m, dict):
+            continue
+        name = str(m.get("name") or "").removeprefix("models/")
+        if (name.startswith("gemini") and "generateContent" in (m.get("supportedGenerationMethods") or [])
+                and not any(k in name for k in skip)):
+            ids.append(name)
+    return sorted(set(ids), reverse=True)

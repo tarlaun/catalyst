@@ -730,6 +730,23 @@
             margin-top: 12px;
         }
 
+        .llm-key-row { display: flex; gap: 8px; align-items: stretch; }
+        .llm-key-row input { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .llm-key-row button { flex: 0 0 auto; width: auto; }
+        .llm-link { font-weight: 400; font-size: 12px; }
+        .llm-notice {
+            margin-bottom: 10px; padding: 8px 10px; border-radius: 10px; font-size: 12.5px; line-height: 1.45;
+            border: 1px solid rgba(240, 180, 92, 0.55); background: rgba(240, 180, 92, 0.12); color: #ffdf9e;
+            overflow-wrap: anywhere;
+        }
+        .llm-notice.error { border-color: rgba(255, 128, 128, 0.55); background: rgba(255, 107, 107, 0.12); color: #ffb3b3; }
+        .chip.ok { border-color: rgba(65, 211, 146, 0.55); color: #95f3c8; }
+        .chip.warn { border-color: rgba(240, 180, 92, 0.65); color: #ffe092; }
+        details.card > summary .chip { margin-left: auto; padding: 3px 9px; font-size: 11.5px; }
+        #llmStatus.ok { color: #95f3c8; }
+        #llmStatus.error { color: #ffb3b3; overflow-wrap: anywhere; }
+        .llm-link { color: #9db8ff; text-transform: none; letter-spacing: 0; }
+
         @media (max-width: 1200px) {
             .app {
                 grid-template-columns: 1fr;
@@ -814,6 +831,45 @@
                 “Generate Style” picks the best dataset(s) for your prompt and styles the map directly.
             </div>
         </section>
+
+        <details class="card" id="llmDetails">
+            <summary>
+                <h2 class="section-title">AI model &amp; API key</h2>
+                <span class="chip" id="llmChip">Checking…</span>
+            </summary>
+            <div>
+                <div class="llm-notice" id="llmNotice" style="display:none;"></div>
+
+                <label for="llmProvider">Provider</label>
+                <select id="llmProvider"></select>
+
+                <label for="llmKey" style="margin-top:10px; display:flex; align-items:center; gap:8px;">
+                    Your API key
+                    <a id="llmKeyLink" href="#" target="_blank" rel="noopener noreferrer" class="llm-link">Get a key ↗</a>
+                </label>
+                <div class="llm-key-row">
+                    <input id="llmKey" type="password" autocomplete="off" spellcheck="false"
+                           autocapitalize="off" data-lpignore="true" data-1p-ignore placeholder="Paste your key"/>
+                    <button type="button" id="llmShowBtn" class="secondary" aria-pressed="false">Show</button>
+                </div>
+
+                <label for="llmModel" style="margin-top:10px;">Model</label>
+                <select id="llmModel"></select>
+
+                <div class="row" style="margin-top:10px;">
+                    <button type="button" id="llmSaveBtn">Save &amp; check key</button>
+                    <button type="button" id="llmClearBtn" class="secondary">Remove key</button>
+                </div>
+
+                <div class="hint" id="llmStatus" role="status" aria-live="polite"></div>
+                <div class="hint">
+                    Your key is kept in this browser as a cookie that page scripts cannot read. It is sent
+                    with your requests to this server, which forwards it to the provider you chose and does
+                    not store or log it. Usage is billed to your own account. Use “Remove key” on a shared
+                    computer.
+                </div>
+            </div>
+        </details>
 
         <section class="card">
             <h2 class="section-title">Assistant Response</h2>
@@ -1071,6 +1127,17 @@
     };
 
     const els = {
+        llmDetails: document.getElementById("llmDetails"),
+        llmChip: document.getElementById("llmChip"),
+        llmNotice: document.getElementById("llmNotice"),
+        llmProvider: document.getElementById("llmProvider"),
+        llmKey: document.getElementById("llmKey"),
+        llmKeyLink: document.getElementById("llmKeyLink"),
+        llmShowBtn: document.getElementById("llmShowBtn"),
+        llmModel: document.getElementById("llmModel"),
+        llmSaveBtn: document.getElementById("llmSaveBtn"),
+        llmClearBtn: document.getElementById("llmClearBtn"),
+        llmStatus: document.getElementById("llmStatus"),
         promptBox: document.getElementById("promptBox"),
         codeBox: document.getElementById("codeBox"),
         styleBtn: document.getElementById("styleBtn"),
@@ -1539,6 +1606,7 @@
         const resp = await fetch(CATALYST_BASE + url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
             body: JSON.stringify(payload)
         });
 
@@ -1549,10 +1617,226 @@
             throw new Error(`Invalid JSON from ${url}`);
         }
 
+        noteLlmOutcome(data);
         if (!resp.ok) {
             throw new Error(data?.error || `Request failed (${resp.status})`);
         }
         return data;
+    }
+
+    // ------------------------------------------------------------------
+    // Bring your own API key. The key is handed to the server once, which
+    // validates it and returns it as an HttpOnly cookie: it stays in this
+    // browser, the server stores nothing, and no page script (including
+    // generated map code) can read it back.
+    // ------------------------------------------------------------------
+    const LLM_FALLBACK_PROVIDERS = [
+        { id: "gemini", label: "Google Gemini", default_model: "gemini-flash-latest", key_url: "https://aistudio.google.com/apikey", key_hint: "AIza…" },
+        { id: "openai", label: "OpenAI (ChatGPT)", default_model: "gpt-5.1", key_url: "https://platform.openai.com/api-keys", key_hint: "sk-…" },
+        { id: "anthropic", label: "Anthropic (Claude)", default_model: "claude-opus-5-5", key_url: "https://platform.claude.com/settings/keys", key_hint: "sk-ant-…" }
+    ];
+    // saved = { provider, model, key_hint } — never the key itself.
+    const llm = { providers: LLM_FALLBACK_PROVIDERS, serverOk: null, serverConfigured: false, saved: null, models: {} };
+
+    async function llmKeyRequest(method, body) {
+        const resp = await fetch(CATALYST_BASE + "/api/llm/key", {
+            method,
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: body ? JSON.stringify({ ...body, base: CATALYST_BASE, https: window.location.protocol === "https:" }) : undefined
+        });
+        let data = null;
+        try { data = await resp.json(); } catch (e) { throw new Error(`Unexpected response (${resp.status})`); }
+        return data;
+    }
+
+    function llmProviderMeta(id) {
+        return llm.providers.find(p => p.id === id) || null;
+    }
+
+    function setLlmStatus(text, kind) {
+        els.llmStatus.textContent = text || "";
+        els.llmStatus.className = "hint" + (kind ? " " + kind : "");
+    }
+
+    function setLlmNotice(text, kind) {
+        els.llmNotice.textContent = text || "";
+        els.llmNotice.className = "llm-notice" + (kind ? " " + kind : "");
+        els.llmNotice.style.display = text ? "" : "none";
+    }
+
+    function fillLlmModels(providerId, selected) {
+        const meta = llmProviderMeta(providerId);
+        const list = (llm.models[providerId] || []).slice();
+        const want = selected || (meta ? meta.default_model : "");
+        if (want && !list.includes(want)) list.unshift(want);
+        els.llmModel.innerHTML = "";
+        for (const id of list) {
+            const o = document.createElement("option");
+            o.value = id; o.textContent = id;
+            els.llmModel.appendChild(o);
+        }
+        if (want) els.llmModel.value = want;
+    }
+
+    function renderLlmChip() {
+        const meta = llm.saved ? llmProviderMeta(llm.saved.provider) : null;
+        let text, cls;
+        if (llm.saved) {
+            text = `Your ${meta ? meta.label : llm.saved.provider} key`; cls = "ok";
+        } else if (llm.serverConfigured && llm.serverOk !== false) {
+            text = "Built-in model"; cls = "ok";
+        } else {
+            text = "Add a key"; cls = "warn";
+        }
+        els.llmChip.textContent = text;
+        els.llmChip.className = "chip " + cls;
+    }
+
+    function onLlmProviderChange() {
+        const id = els.llmProvider.value;
+        const meta = llmProviderMeta(id);
+        const sameAsSaved = llm.saved && llm.saved.provider === id;
+        els.llmKeyLink.href = meta ? meta.key_url : "#";
+        els.llmKey.value = "";
+        els.llmKey.placeholder = sameAsSaved
+            ? `Saved key ending in ${llm.saved.key_hint} (paste a new one to replace it)`
+            : (meta ? `Paste your key (${meta.key_hint})` : "Paste your key");
+        fillLlmModels(id, sameAsSaved ? llm.saved.model : "");
+        setLlmStatus("");
+    }
+
+    function applyLlmSaved(data) {
+        llm.saved = data && data.saved
+            ? { provider: data.provider, model: data.model, key_hint: data.key_hint } : null;
+        if (data && Array.isArray(data.models) && data.provider) llm.models[data.provider] = data.models;
+        if (llm.saved && llmProviderMeta(llm.saved.provider)) els.llmProvider.value = llm.saved.provider;
+        onLlmProviderChange();
+        renderLlmChip();
+    }
+
+    async function saveLlmKey() {
+        const provider = els.llmProvider.value;
+        const key = els.llmKey.value.trim();
+        if (!key) {
+            setLlmStatus(llm.saved && llm.saved.provider === provider
+                ? "Your key is already saved. Paste a new key to replace it." : "Paste an API key first.", "error");
+            els.llmKey.focus();
+            return;
+        }
+        els.llmSaveBtn.disabled = true;
+        els.llmSaveBtn.textContent = "Checking…";
+        setLlmStatus("");
+        try {
+            const data = await llmKeyRequest("POST", { provider, key, model: els.llmModel.value || "" });
+            if (!data.ok) {
+                setLlmStatus(`Key not accepted: ${data.error || "unknown error"}`, "error");
+                return;
+            }
+            applyLlmSaved(data);
+            setLlmNotice("");
+            setLlmStatus(`Key works and is saved. Using ${data.model}.`, "ok");
+        } catch (err) {
+            setLlmStatus(`Could not check the key: ${err.message}`, "error");
+        } finally {
+            els.llmSaveBtn.disabled = false;
+            els.llmSaveBtn.textContent = "Save & check key";
+        }
+    }
+
+    async function clearLlmKey() {
+        try {
+            await llmKeyRequest("DELETE", {});
+        } catch (err) {
+            setLlmStatus(`Could not remove the key: ${err.message}`, "error");
+            return;
+        }
+        applyLlmSaved(null);
+        setLlmStatus("Key removed from this browser.");
+        showLlmHintIfNeeded();
+    }
+
+    async function changeLlmModel() {
+        if (!(llm.saved && llm.saved.provider === els.llmProvider.value)) return;
+        try {
+            const data = await llmKeyRequest("POST", { model: els.llmModel.value });
+            if (data.ok) {
+                llm.saved.model = data.model;
+                setLlmStatus(`Using ${data.model}.`, "ok");
+            } else {
+                setLlmStatus(data.error || "Could not change the model.", "error");
+            }
+        } catch (err) {
+            setLlmStatus(`Could not change the model: ${err.message}`, "error");
+        }
+    }
+
+    function showLlmHintIfNeeded() {
+        if (llm.saved || (llm.serverConfigured && llm.serverOk !== false)) return;
+        setLlmNotice(
+            "The built-in AI model is not available on this site right now. Add your own API key " +
+            "below to have an AI model pick datasets and style the map. Without one, Catalyst falls " +
+            "back to keyword matching with default styles."
+        );
+        els.llmDetails.open = true;
+    }
+
+    // Every LLM-backed response reports what happened on the model side.
+    function noteLlmOutcome(data) {
+        const info = data && data.llm;
+        if (!info) return;
+        if (info.source === "server") llm.serverOk = !info.error;
+        if (!info.error) {
+            if (info.source === "user") setLlmNotice("");
+            renderLlmChip();
+            return;
+        }
+        if (info.source === "user") {
+            setLlmNotice(`Your API key did not work for this request, so default matching was used. ${info.error}`, "error");
+        } else {
+            setLlmNotice(
+                "The built-in AI model is not available right now, so default matching was used. " +
+                "Add your own API key below to use an AI model."
+            );
+        }
+        els.llmDetails.open = true;
+        renderLlmChip();
+    }
+
+    async function initLlm() {
+        els.llmProvider.addEventListener("change", onLlmProviderChange);
+        els.llmSaveBtn.addEventListener("click", saveLlmKey);
+        els.llmClearBtn.addEventListener("click", clearLlmKey);
+        els.llmModel.addEventListener("change", changeLlmModel);
+        els.llmKey.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveLlmKey(); } });
+        els.llmShowBtn.addEventListener("click", () => {
+            const show = els.llmKey.type === "password";
+            els.llmKey.type = show ? "text" : "password";
+            els.llmShowBtn.textContent = show ? "Hide" : "Show";
+            els.llmShowBtn.setAttribute("aria-pressed", String(show));
+        });
+
+        // An earlier build kept the key in localStorage; make sure none is left there.
+        try { localStorage.removeItem("catalyst.llm.v1"); } catch (e) { /* ignore */ }
+
+        let saved = null;
+        try {
+            const cfg = await getJSON("/api/llm/config");
+            if (Array.isArray(cfg.providers) && cfg.providers.length) llm.providers = cfg.providers;
+            llm.serverConfigured = !!cfg.server_key_configured;
+            llm.serverOk = cfg.server_llm_ok;
+            saved = await llmKeyRequest("GET");
+        } catch (e) {
+            setLlmStatus("Could not load the AI settings. Reload the page to try again.", "error");
+        }
+        els.llmProvider.innerHTML = "";
+        for (const p of llm.providers) {
+            const o = document.createElement("option");
+            o.value = p.id; o.textContent = p.label;
+            els.llmProvider.appendChild(o);
+        }
+        applyLlmSaved(saved);
+        showLlmHintIfNeeded();
     }
 
     async function getJSON(url) {
@@ -2115,6 +2399,7 @@
         setSkillMode("basic");
         updateStatus();
         renderMetadata();
+        initLlm();
         await loadDatasetsCatalog();
     }
 

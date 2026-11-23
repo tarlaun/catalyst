@@ -10,6 +10,10 @@ map styling suggestions from dataset attribute statistics.
 provider.py          — ABC + normalized response model
 gemini_provider.py   — Google Gemini Interactions API (stateful multi-turn)
 ollama_provider.py   — Local Ollama instance (stateless fallback)
+openai_provider.py   — OpenAI Chat Completions API (stateless)
+anthropic_provider.py — Anthropic Messages API (stateless)
+credentials.py       — Request-scoped "bring your own key" credentials
+_http.py             — Shared urllib JSON helper
 factory.py           — LLMFactory: provider registry + env-var selection
 suggestions.py       — High-level style conversation helpers
 
@@ -87,3 +91,24 @@ starlet serve --dir datasets
 
 No changes to the endpoint or factory selection logic are needed — the new
 provider is automatically available via `LLM_PROVIDER=<name>`.
+
+## Bring your own key
+
+Visitors of a public deployment can use their own Gemini, OpenAI or Anthropic
+key. The web UI posts it once to `POST /api/llm/key`; the server validates it
+and returns it as an HttpOnly, SameSite=Strict cookie, so it lives only in the
+visitor's browser and no page script (including LLM-generated map code) can
+read it. API clients can send headers instead:
+
+```
+X-LLM-Provider: gemini | openai | anthropic
+X-LLM-Key:      <the visitor's key>
+X-LLM-Model:    <optional model id>
+```
+
+Either way the server validates the values, keeps them in a request-scoped
+`ContextVar` (`credentials.py`) and `LLMFactory.get_provider()` builds the
+provider from them, overriding the deployment's own `LLM_PROVIDER`. The key is
+never stored, cached or logged; pass any provider error through
+`credentials.redact()` before logging or returning it. Set
+`CATALYST_REQUIRE_USER_KEY=1` to stop the deployment's own key from being used.

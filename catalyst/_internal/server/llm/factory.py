@@ -1,6 +1,7 @@
 import logging
 import os
 
+from .credentials import current_credentials, note_used
 from .provider import LLMProvider, LLMProviderError
 
 logger = logging.getLogger(__name__)
@@ -12,9 +13,48 @@ _DEFAULT_PROVIDER = "gemini"
 # deferred until the provider is actually requested.
 _PROVIDERS = {
     "gemini": lambda: _make_gemini(),
+    "openai": lambda: _make_openai(),
+    "anthropic": lambda: _make_anthropic(),
     "ollama": lambda: _make_ollama(),
     "fallback": lambda: _make_fallback(),
 }
+
+
+def _make_openai() -> LLMProvider:
+    from .openai_provider import OpenAIProvider
+    return OpenAIProvider()
+
+
+def _make_anthropic() -> LLMProvider:
+    from .anthropic_provider import AnthropicProvider
+    return AnthropicProvider()
+
+
+def _make_for_credentials(creds) -> LLMProvider:
+    """Provider built from a visitor's own key (see ``credentials.py``)."""
+    if creds.provider == "gemini":
+        from .gemini_provider import GeminiProvider
+        return GeminiProvider(model=creds.model, api_key=creds.api_key)
+    if creds.provider == "openai":
+        from .openai_provider import OpenAIProvider
+        return OpenAIProvider(model=creds.model, api_key=creds.api_key)
+    if creds.provider == "anthropic":
+        from .anthropic_provider import AnthropicProvider
+        return AnthropicProvider(model=creds.model, api_key=creds.api_key)
+    raise LLMProviderError(f"Unsupported bring-your-own-key provider '{creds.provider}'.")
+
+
+def list_models_for(provider: str, api_key: str):
+    """Model ids the key can use; raises LLMProviderError when the key is rejected."""
+    if provider == "gemini":
+        from .gemini_provider import list_models
+    elif provider == "openai":
+        from .openai_provider import list_models
+    elif provider == "anthropic":
+        from .anthropic_provider import list_models
+    else:
+        raise LLMProviderError(f"Unsupported provider '{provider}'.")
+    return list_models(api_key)
 
 
 def _make_gemini() -> LLMProvider:
@@ -83,12 +123,23 @@ def _make_fallback() -> LLMProvider:
     return _FallbackProvider(builders, names)
 
 
+def require_user_key() -> bool:
+    """``CATALYST_REQUIRE_USER_KEY=1``: never spend the deployment's own LLM key
+    on visitors; they must bring their own (heuristics are used otherwise)."""
+    return os.environ.get("CATALYST_REQUIRE_USER_KEY", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 class LLMFactory:
     """Instantiate an :class:`LLMProvider` by name.
 
     Supported names (case-insensitive):
         * ``"gemini"`` — Google Gemini Interactions API
+        * ``"openai"`` — OpenAI Chat Completions API
+        * ``"anthropic"`` — Anthropic Messages API
         * ``"ollama"`` — Local Ollama
+
+    When the current request carries a visitor's own API key, that provider
+    and key are used regardless of *name*.
 
     Future providers can be added by registering a builder in `_PROVIDERS`.
     """
@@ -100,7 +151,18 @@ class LLMFactory:
         Raises:
             LLMProviderError: if *name* is unknown or construction fails.
         """
+        # A visitor's own key (request-scoped) takes precedence over whatever
+        # the deployment is configured with.
+        creds = current_credentials()
+        if creds is not None:
+            note_used(creds.provider, creds.model)
+            return _make_for_credentials(creds)
+        if require_user_key():
+            raise LLMProviderError(
+                "This site does not provide a built-in AI model: add your own API key to use one."
+            )
         key = (name or "").strip().lower()
+        note_used(key, None)
         builder = _PROVIDERS.get(key)
         if builder is None:
             supported = ", ".join(sorted(_PROVIDERS))

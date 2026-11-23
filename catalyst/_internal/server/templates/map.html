@@ -559,7 +559,7 @@ const api = {
 // generated code — padding-top, margin-top, border-top, align-self, top-right — do
 // NOT false-positive, while bare or member-access globals (top, window.document,
 // self.eval, parent.location, a.constructor) are still blocked.
-const FORBIDDEN = /(?<![\w-])(document|window|parent|top|self|globalThis|frames|opener|fetch|XMLHttpRequest|WebSocket|EventSource|importScripts|localStorage|sessionStorage|indexedDB|cookie|navigator|location|eval|Function|setTimeout|setInterval|require|module|process|__proto__|constructor)(?![\w-])/;
+const FORBIDDEN = /(?<![\w-])(document|window|parent|top|self|globalThis|frames|opener|fetch|XMLHttpRequest|WebSocket|EventSource|importScripts|localStorage|sessionStorage|indexedDB|cookie|navigator|location|eval|Function|setTimeout|setInterval|require|module|process|__proto__|constructor|ownerDocument|defaultView|originalEvent|getRootNode|parentNode|parentElement|contentWindow|contentDocument|postMessage|Image|Worker|import)(?![\w-])/;
 
 function runScript(script) {
   const src = String(script || "");
