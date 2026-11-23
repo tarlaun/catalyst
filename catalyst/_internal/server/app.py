@@ -13,7 +13,7 @@ import os
 import re
 import shutil
 
-from flask import Flask, Response, render_template, request, send_from_directory
+from flask import Flask, Response, render_template, request, send_from_directory, g
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 
@@ -28,6 +28,8 @@ from .llm import (
     start_multilayer_conversation,
     start_style_conversation,
 )
+from .llm import credentials as llm_credentials
+from .llm.factory import list_models_for, require_user_key
 from .llm.provider import LLMProviderError
 from .tiler.tiler import VectorTiler
 
@@ -87,6 +89,173 @@ def create_app(
     template_dir = str(server_dir / "templates")
 
     app = Flask(__name__, template_folder=template_dir)
+
+    # ------------------------------------------------------------ bring your own key
+    # A visitor may send their own LLM API key with a request (X-LLM-Provider /
+    # X-LLM-Key / X-LLM-Model). It is validated, held in a request-scoped
+    # ContextVar for exactly this request, and never stored, cached or logged.
+    _server_llm_state: Dict[str, Any] = {"ok": None}
+
+    @app.before_request
+    def _install_llm_credentials():
+        # Browsers send the key as an HttpOnly cookie (set by POST /api/llm/key);
+        # API clients may send it in headers, which take precedence.
+        try:
+            creds = llm_credentials.parse_credentials(
+                request.headers.get("X-LLM-Provider", ""),
+                request.headers.get("X-LLM-Key", ""),
+                request.headers.get("X-LLM-Model", ""),
+            )
+        except llm_credentials.CredentialsError as exc:
+            g.llm_token = llm_credentials.begin_request(None)
+            return _json_response({"error": str(exc), "llm_key_rejected": True}, 400)
+        if creds is None:
+            creds = llm_credentials.decode_cookie(request.cookies.get(llm_credentials.COOKIE_NAME, ""))
+        g.llm_token = llm_credentials.begin_request(creds)
+        return None
+
+    @app.teardown_request
+    def _clear_llm_credentials(_exc=None):
+        llm_credentials.end_request(g.pop("llm_token", None))
+
+    def _server_key_configured() -> bool:
+        env = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+        if require_user_key():
+            return False
+        if _LLM_PROVIDER in ("ollama", "fallback"):
+            return True
+        return bool(os.environ.get(env.get(_LLM_PROVIDER, ""), "").strip())
+
+    def _with_llm(payload: Any) -> Any:
+        """Attach the (secret-free) LLM outcome of this request to a response."""
+        if not isinstance(payload, dict):
+            return payload
+        summary = llm_credentials.request_summary()
+        if summary["source"] == "server" and summary["provider"]:
+            _server_llm_state["ok"] = summary["error"] is None
+        payload["llm"] = summary
+        return payload
+
+    @app.get("/api/llm/config")
+    def llm_config():
+        return _json_response({
+            "server_provider": _LLM_PROVIDER,
+            "server_key_configured": _server_key_configured(),
+            # None until the server key has been tried; False once it has failed.
+            "server_llm_ok": _server_llm_state["ok"] if _server_key_configured() else False,
+            "providers": [
+                {"id": pid, **meta} for pid, meta in llm_credentials.USER_KEY_PROVIDERS.items()
+            ],
+        })
+
+    _COOKIE_BASE_RE = re.compile(r"^(?:/[A-Za-z0-9._~-]{1,64}){0,6}$")
+
+    def _llm_cookie_response(payload: Dict[str, Any], status: int, creds, base: str, https: bool = False):
+        """JSON response that also sets (creds) or clears (None) the key cookie.
+
+        The cookie is HttpOnly (page scripts, including generated map code, can
+        never read the key), SameSite=Strict, and scoped to this app's own API
+        path so sibling apps on the same host do not receive it."""
+        resp = app.make_response(_json_response(payload, status))
+        base = base if isinstance(base, str) and _COOKIE_BASE_RE.match(base) else (_BASE_PATH or "")
+        path = (base.rstrip("/") + "/api") if base else "/api"
+        # The page tells us whether it was loaded over HTTPS (behind a reverse
+        # proxy this app only ever sees plain HTTP from the proxy).
+        secure = bool(https) or request.is_secure or request.headers.get("X-Forwarded-Proto", "") == "https"
+        common = dict(path=path, secure=secure, httponly=True, samesite="Strict")
+        if creds is None:
+            resp.set_cookie(llm_credentials.COOKIE_NAME, "", max_age=0, **common)
+        else:
+            resp.set_cookie(llm_credentials.COOKIE_NAME, llm_credentials.encode_cookie(creds),
+                            max_age=llm_credentials.COOKIE_MAX_AGE, **common)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    def _saved_key_payload(creds) -> Dict[str, Any]:
+        if creds is None:
+            return {"saved": False}
+        return {"saved": True, "provider": creds.provider, "model": creds.model or
+                llm_credentials.USER_KEY_PROVIDERS[creds.provider]["default_model"],
+                "key_hint": llm_credentials.key_hint(creds)}
+
+    @app.get("/api/llm/key")
+    def llm_key_status():
+        """Whether this browser has a saved key (never the key itself)."""
+        resp = app.make_response(_json_response(_saved_key_payload(llm_credentials.current_credentials())))
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.post("/api/llm/key")
+    def llm_key_save():
+        """Validate a visitor's key and hand it back as an HttpOnly cookie.
+
+        Body: {provider, key, model?, base?}. With only {model} (and an existing
+        cookie) the saved model is changed. Nothing is stored on the server."""
+        if not request.is_json:
+            return _json_response({"ok": False, "error": "Send JSON."}, 415)
+        body = request.get_json(silent=True) or {}
+        base, https = body.get("base", ""), body.get("https") is True
+        current = llm_credentials.decode_cookie(request.cookies.get(llm_credentials.COOKIE_NAME, ""))
+        key = str(body.get("key") or "").strip()
+        try:
+            if key:
+                creds = llm_credentials.parse_credentials(
+                    str(body.get("provider") or ""), key, str(body.get("model") or ""))
+            elif current is not None and body.get("model"):
+                creds = llm_credentials.parse_credentials(current.provider, current.api_key, str(body["model"]))
+                return _llm_cookie_response({"ok": True, **_saved_key_payload(creds)}, 200, creds, base, https)
+            else:
+                return _json_response({"ok": False, "error": "Paste an API key first."}, 400)
+        except llm_credentials.CredentialsError as exc:
+            return _json_response({"ok": False, "error": str(exc)}, 400)
+        token = llm_credentials.begin_request(creds)      # so redact() knows this key
+        try:
+            models = list_models_for(creds.provider, creds.api_key)
+        except Exception as exc:  # noqa: BLE001 - reported to the visitor, redacted
+            logger.info("[LLM] %s key check failed", creds.provider)
+            return _json_response({"ok": False, "error": llm_credentials.redact(exc)}, 200)
+        finally:
+            llm_credentials.end_request(token)
+        default = llm_credentials.USER_KEY_PROVIDERS[creds.provider]["default_model"]
+        if not creds.model or (models and creds.model not in models):
+            creds.model = default if (default in models or not models) else _preferred_model(creds.provider, models)
+        return _llm_cookie_response(
+            {"ok": True, "models": models, **_saved_key_payload(creds)}, 200, creds, base, https)
+
+    @app.delete("/api/llm/key")
+    def llm_key_delete():
+        body = request.get_json(silent=True) or {}
+        return _llm_cookie_response({"ok": True, "saved": False}, 200, None, body.get("base", ""),
+                                    body.get("https") is True)
+
+    def _preferred_model(provider: str, models: List[str]) -> str:
+        prefs = {"openai": ("gpt-5.1", "gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o"),
+                 "gemini": ("gemini-flash-latest", "gemini-2.5-flash"),
+                 "anthropic": ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")}
+        for m in prefs.get(provider, ()):
+            if m in models:
+                return m
+        return models[0]
+
+    @app.post("/api/llm/models")
+    def llm_models():
+        """Validate the visitor's key by listing the models it can use."""
+        creds = llm_credentials.current_credentials()
+        if creds is None:
+            return _json_response({"ok": False, "error": "No API key was sent."}, 400)
+        meta = llm_credentials.USER_KEY_PROVIDERS[creds.provider]
+        try:
+            models = list_models_for(creds.provider, creds.api_key)
+        except Exception as exc:  # noqa: BLE001 - reported to the visitor, redacted
+            logger.info("[LLM] %s key check failed", creds.provider)
+            return _json_response({"ok": False, "error": llm_credentials.redact(exc)}, 200)
+        default = meta["default_model"]
+        return _json_response({
+            "ok": True,
+            "provider": creds.provider,
+            "models": models,
+            "default_model": default if (default in models or not models) else _preferred_model(creds.provider, models),
+        })
     app.config["JSON_AS_ASCII"] = False
     CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -1333,11 +1502,20 @@ def create_app(
     _PIVOT_CHALLENGER_MIN = float(os.environ.get("CATALYST_PIVOT_CHALLENGER_MIN", "0.62"))
     _PIVOT_MARGIN = float(os.environ.get("CATALYST_PIVOT_MARGIN", "0.03"))
     # Minimum top-candidate similarity for the NO-LLM (heuristic) path to render
-    # anything at all. Measured on the live gemini-embedding-001 index: genuine
-    # requests score >= 0.62 on their dataset, out-of-scope ones ("cafes in
-    # london", "hotels in paris") top out at 0.50-0.59. The LLM path makes this
-    # call itself (no_match); this floor keeps the offline fallback honest too.
-    _MATCH_MIN = float(os.environ.get("CATALYST_MATCH_MIN", "0.58"))
+    # anything at all. The LLM path makes this call itself (no_match); this
+    # floor keeps the offline fallback honest too. Scores are embedder-specific:
+    # on gemini-embedding-001 genuine requests score >= 0.62 and out-of-scope
+    # ones ("cafes in london", "hotels in paris") top out at 0.50-0.59; on the
+    # offline local-hash embedder genuine requests score ~0.17-0.19 and
+    # out-of-scope ones ~0.07-0.11 — so the default floor must follow the
+    # active embedder, or the no-key demo would refuse everything.
+    _MATCH_MIN_ENV = os.environ.get("CATALYST_MATCH_MIN")
+
+    def _match_min(router: CatalogRouter) -> float:
+        if _MATCH_MIN_ENV:
+            return float(_MATCH_MIN_ENV)
+        embedder_id = str(getattr(getattr(router, "embedder", None), "embedder_id", "") or "")
+        return 0.12 if embedder_id.startswith("local-hash") else 0.58
 
     def _no_match_response(
         query: str, message: str, candidate_payload: List[Dict[str, Any]],
@@ -1604,15 +1782,16 @@ def create_app(
             assistant_response = multi.assistant_response
             interaction_id = _normalize_unicode_text(multi.interaction_id)
         except (LLMProviderError, Exception) as exc:  # noqa: BLE001 - intentional broad fallback
+            llm_credentials.note_error(exc)
             logger.warning(
                 "[ChatStyle] Multilayer LLM unavailable (%s); using heuristic overlay.",
-                exc,
+                llm_credentials.redact(exc),
             )
             selection_mode = "heuristic"
             # No LLM to judge fitness, so gate on similarity: below the floor the
             # best "match" is semantic noise, and an honest refusal beats a wrong map.
             top_score = float(candidates[0].score) if candidates else 0.0
-            if top_score < _MATCH_MIN:
+            if top_score < _match_min(router):
                 return _no_match_response(
                     normalized_query, "", candidate_payload,
                     selection_mode="no-match-heuristic",
@@ -1717,6 +1896,7 @@ def create_app(
                 previous_interaction_id=_normalize_unicode_text(interaction_id),
                 selected_attributes_hint=[_normalize_unicode_text(x) for x in (current_attributes or [])],
                 current_style_hint=current_style or {},
+                dataset_summary=selected_summary,
                 provider_name=_LLM_PROVIDER,
                 temperature=0.2,
             )
@@ -1725,8 +1905,11 @@ def create_app(
             # query as a fresh overlay rather than failing the turn.
             logger.warning(
                 "[ChatStyle] Follow-up LLM unavailable (%s); restarting as overlay.",
-                exc,
+                llm_credentials.redact(exc),
             )
+            # The fresh turn below decides the outcome; if its LLM call works,
+            # this request succeeded and must not be reported as a key failure.
+            llm_credentials.clear_errors()
             return _run_initial_chat_turn(user_query=normalized_query, k=5)
         llm_ms = (perf_counter() - llm_t0) * 1000.0
 
@@ -2188,7 +2371,7 @@ def create_app(
         try:
             if not interaction_id or not current_dataset:
                 response, status = _run_initial_chat_turn(user_query=user_query, k=k)
-                return _json_response(response, status)
+                return _json_response(_with_llm(response), status)
 
             derive_live_body = body.get("derive_live")
             active_join_source = (
@@ -2202,7 +2385,7 @@ def create_app(
                 active_join_source=active_join_source or None,
             ):
                 response, status = _run_initial_chat_turn(user_query=user_query, k=k)
-                return _json_response(response, status)
+                return _json_response(_with_llm(response), status)
 
             if not _dataset_exists(current_dataset):
                 return _json_response({"error": f"Current dataset not found: {current_dataset}"}, 404)
@@ -2216,15 +2399,18 @@ def create_app(
                 current_style=current_style,
                 derive_live=derive_live_raw if isinstance(derive_live_raw, dict) else None,
             )
-            return _json_response(response, status)
+            return _json_response(_with_llm(response), status)
 
         except FileNotFoundError as e:
             return _json_response({"error": str(e)}, 503)
         except LookupError as e:
             return _json_response({"error": str(e)}, 404)
         except Exception as e:
-            logger.exception("[ChatStyle] Failed for query=%r", user_query)
-            return _json_response({"error": f"Chat styling failed: {e}"}, 500)
+            if isinstance(e, LLMProviderError):
+                logger.error("[ChatStyle] Failed for query=%r: %s", user_query, llm_credentials.redact(e))
+            else:
+                logger.exception("[ChatStyle] Failed for query=%r", user_query)
+            return _json_response(_with_llm({"error": f"Chat styling failed: {llm_credentials.redact(e)}"}), 500)
 
     @app.post("/api/upload-dataset")
     def upload_dataset_and_build():
@@ -2384,10 +2570,16 @@ def create_app(
                     or not _dataset_exists(code_join_source)):
                 code_join_source = code_join_value = ""
 
+        # The client sets lock_dataset after it has just finished a derive job
+        # for this very prompt: the pivot check must not re-route (derived
+        # datasets are absent from the catalog index, so a challenger always
+        # wins and the same derive would run again — an infinite loop).
+        lock_dataset = bool(body.get("lock_dataset")) and bool(current_dataset)
+
         # Same pivot rule as chat-style: if the prompt clearly targets a different
         # dataset than the ongoing conversation, re-route instead of generating
         # code against the stale one.
-        if current_dataset and _looks_like_new_dataset_request(
+        if current_dataset and not lock_dataset and _looks_like_new_dataset_request(
             user_query=user_query,
             current_dataset=current_dataset,
             current_style=current_style,
@@ -2414,7 +2606,7 @@ def create_app(
                 # or found no data for the request: hand that answer straight
                 # to the client instead of generating code against nothing.
                 if initial_response.get("mode") in ("deriving", "no_data"):
-                    return _json_response(initial_response, initial_status)
+                    return _json_response(_with_llm(initial_response), initial_status)
 
                 current_dataset = _normalize_unicode_text(initial_response.get("selected_dataset", "")).strip()
                 interaction_id = _normalize_unicode_text(initial_response.get("interaction_id", "")).strip()
@@ -2489,7 +2681,7 @@ def create_app(
                         "last_tile_request_ms": round(float(tile_metric.get("elapsed_ms")), 3) if tile_metric and tile_metric.get("elapsed_ms") is not None else None,
                     },
                 }
-                return _json_response(response, 200)
+                return _json_response(_with_llm(response), 200)
 
             if not _dataset_exists(current_dataset):
                 return _json_response({"error": f"Dataset not found: {current_dataset}"}, 404)
@@ -2549,15 +2741,19 @@ def create_app(
                     "last_tile_request_ms": round(float(tile_metric.get("elapsed_ms")), 3) if tile_metric and tile_metric.get("elapsed_ms") is not None else None,
                 },
             }
-            return _json_response(response, 200)
+            return _json_response(_with_llm(response), 200)
 
         except FileNotFoundError as e:
             return _json_response({"error": str(e)}, 503)
         except LookupError as e:
             return _json_response({"error": str(e)}, 404)
         except Exception as e:
-            logger.exception("[GenerateMapCode] Failed for query=%r", user_query)
-            return _json_response({"error": f"Map code generation failed: {e}"}, 500)
+            if isinstance(e, LLMProviderError):
+                llm_credentials.note_error(e)
+                logger.error("[GenerateMapCode] Failed for query=%r: %s", user_query, llm_credentials.redact(e))
+            else:
+                logger.exception("[GenerateMapCode] Failed for query=%r", user_query)
+            return _json_response(_with_llm({"error": f"Map code generation failed: {llm_credentials.redact(e)}"}), 500)
 
     # ------------------------------------------------------------------ ephemeral
     # Optionally avoid permanently saving join/aggregate-derived datasets (e.g. on

@@ -660,13 +660,18 @@ def continue_style_conversation(
     previous_interaction_id: str,
     selected_attributes_hint: Optional[List[str]] = None,
     current_style_hint: Optional[Dict[str, Any]] = None,
+    dataset_summary: Optional[Dict[str, Any]] = None,
     provider_name: str = "gemini",
     temperature: float = 0.2,
 ) -> StyleConversationResult:
     provider = LLMFactory.get_provider(provider_name)
 
+    # The schema is repeated on every follow-up: stateless providers (and a
+    # fallback-chain failover) have no server-side memory of the first turn.
     prompt = (
-        f"Current dataset: {dataset}\n"
+        (f"Dataset summary:\n{json.dumps(dataset_summary, ensure_ascii=False, indent=2)}\n\n"
+         if dataset_summary else "")
+        + f"Current dataset: {dataset}\n"
         f"Selected attributes hint: {json.dumps(selected_attributes_hint or [], ensure_ascii=False)}\n"
         f"Current style hint:\n{json.dumps(current_style_hint or {}, ensure_ascii=False, indent=2)}\n\n"
         f"User follow-up request:\n{user_query}\n"

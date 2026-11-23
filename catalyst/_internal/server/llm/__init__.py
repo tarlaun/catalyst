@@ -1,6 +1,8 @@
 from .provider import LLMProvider, LLMProviderError, LLMResponse
 from .gemini_provider import GeminiProvider
 from .ollama_provider import OllamaProvider
+from .openai_provider import OpenAIProvider
+from .anthropic_provider import AnthropicProvider
 from .factory import LLMFactory
 from .suggestions import (
     GeneratedMapCodeResult,
@@ -20,6 +22,8 @@ __all__ = [
     "LLMResponse",
     "GeminiProvider",
     "OllamaProvider",
+    "OpenAIProvider",
+    "AnthropicProvider",
     "LLMFactory",
     "StyleConversationResult",
     "MultiLayerStyleResult",

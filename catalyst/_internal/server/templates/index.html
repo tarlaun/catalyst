@@ -112,7 +112,15 @@
             color: var(--text);
             padding: 11px 12px;
             font: inherit;
+            /* Without this, controls inherit the 16px browser default while the
+               rest of the sidebar runs at 12-13px — Chrome renders the <option>
+               popup at the control's size, so the dropdown looked huge. */
+            font-size: 13px;
             outline: none;
+        }
+
+        option, optgroup {
+            font-size: 13px;
         }
 
         textarea {
@@ -203,10 +211,14 @@
             white-space: nowrap;
         }
 
+        /* Styled as a spoken message (accent bar, tinted), NOT like an input
+           field — the prompt textarea sits right above it and users otherwise
+           read this as editable. */
         .assistant-box {
-            background: #0b1125;
-            border: 1px solid var(--border);
-            border-radius: 14px;
+            background: linear-gradient(135deg, rgba(106, 166, 255, 0.10), rgba(134, 225, 255, 0.04));
+            border: 1px solid rgba(106, 166, 255, 0.28);
+            border-left: 3px solid var(--accent);
+            border-radius: 4px 14px 14px 4px;
             padding: 12px;
             font-size: 13px;
             color: #dbe7ff;
@@ -241,6 +253,166 @@
             padding: 6px 10px;
             font-size: 12px;
             color: var(--text);
+        }
+
+        .mode-toggle {
+            display: flex;
+            gap: 4px;
+            background: #0b1125;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 4px;
+        }
+
+        .mode-toggle button {
+            flex: 1 1 0;
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--muted);
+            font-weight: 800;
+            font-size: 13px;
+            padding: 8px 10px;
+            border-radius: 9px;
+        }
+
+        .mode-toggle button:hover {
+            color: var(--text);
+            opacity: 1;
+        }
+
+        .mode-toggle button.active {
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            color: #07101f;
+        }
+
+        .help-btn {
+            flex: 0 0 auto;
+            width: 18px;
+            height: 18px;
+            padding: 0;
+            border-radius: 50%;
+            background: var(--chip);
+            border: 1px solid var(--border);
+            color: var(--muted);
+            font-size: 11px;
+            font-weight: 800;
+            line-height: 1;
+        }
+
+        .help-btn:hover {
+            color: var(--text);
+            border-color: var(--accent);
+        }
+
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 50;
+            background: rgba(4, 7, 18, 0.66);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+
+        .modal {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            box-shadow: var(--shadow);
+            padding: 18px;
+            max-width: 560px;
+            width: 100%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .modal-header h3 {
+            margin: 0;
+            font-size: 16px;
+        }
+
+        .modal-close {
+            flex: 0 0 auto;
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            border-radius: 10px;
+            padding: 4px 10px;
+        }
+
+        .modal-section {
+            background: #0e152e;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 12px;
+            margin-top: 10px;
+        }
+
+        .modal-section h4 {
+            margin: 0 0 6px 0;
+            font-size: 13px;
+        }
+
+        .modal-section p, .modal-section ul {
+            margin: 0;
+            font-size: 12.5px;
+            color: var(--muted);
+            line-height: 1.55;
+        }
+
+        .modal-section ul {
+            padding-left: 18px;
+            margin-top: 6px;
+        }
+
+        .modal-section li {
+            margin-top: 3px;
+        }
+
+        .mode-section {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .browse-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 10px;
+            max-height: 420px;
+            overflow-y: auto;
+        }
+
+        .browse-item {
+            background: #0e152e;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 10px 12px;
+            cursor: pointer;
+        }
+
+        .browse-item:hover {
+            border-color: var(--accent);
+        }
+
+        .browse-item.active {
+            border-color: var(--accent);
+            box-shadow: inset 0 0 0 1px var(--accent);
+        }
+
+        .browse-item-name {
+            font-weight: 700;
+            font-size: 13px;
         }
 
         .meta-grid {
@@ -558,6 +730,23 @@
             margin-top: 12px;
         }
 
+        .llm-key-row { display: flex; gap: 8px; align-items: stretch; }
+        .llm-key-row input { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .llm-key-row button { flex: 0 0 auto; width: auto; }
+        .llm-link { font-weight: 400; font-size: 12px; }
+        .llm-notice {
+            margin-bottom: 10px; padding: 8px 10px; border-radius: 10px; font-size: 12.5px; line-height: 1.45;
+            border: 1px solid rgba(240, 180, 92, 0.55); background: rgba(240, 180, 92, 0.12); color: #ffdf9e;
+            overflow-wrap: anywhere;
+        }
+        .llm-notice.error { border-color: rgba(255, 128, 128, 0.55); background: rgba(255, 107, 107, 0.12); color: #ffb3b3; }
+        .chip.ok { border-color: rgba(65, 211, 146, 0.55); color: #95f3c8; }
+        .chip.warn { border-color: rgba(240, 180, 92, 0.65); color: #ffe092; }
+        details.card > summary .chip { margin-left: auto; padding: 3px 9px; font-size: 11.5px; }
+        #llmStatus.ok { color: #95f3c8; }
+        #llmStatus.error { color: #ffb3b3; overflow-wrap: anywhere; }
+        .llm-link { color: #9db8ff; text-transform: none; letter-spacing: 0; }
+
         @media (max-width: 1200px) {
             .app {
                 grid-template-columns: 1fr;
@@ -578,20 +767,23 @@
         <section class="card">
             <h1 class="title">CATALYST</h1>
             <p class="subtitle">Geospatial Data Exploration Styling</p>
+
+            <div class="mode-toggle" id="appModeToggle" style="margin-top:12px;">
+                <button type="button" data-mode="explore" class="active">Explore</button>
+                <button type="button" data-mode="browse">Browse</button>
+            </div>
+            <div class="hint" id="modeHint">
+                Describe what you want to see — Catalyst finds the right dataset(s) and styles the map.
+                No need to pick a dataset first.
+            </div>
         </section>
 
-        <section class="card">
-            <label for="datasetSelect">Available datasets</label>
-            <select id="datasetSelect">
-                <option value="">Loading datasets...</option>
-            </select>
-        </section>
-
+        <div class="mode-section" id="exploreSection">
         <section class="card">
             <label for="promptExamples">Try an example</label>
             <select id="promptExamples">
                 <option value="">Choose an example prompt…</option>
-                <optgroup label="Style one dataset — use “Suggest Style”">
+                <optgroup label="Style one dataset">
                     <option>Color the Riverside vegetation map by vegetation type, one distinct color per type.</option>
                     <option>Show the fire hazard severity zones, colored from moderate to very high risk.</option>
                     <option>Color Riverside highways by their highway type (interstate, ramp, US highway).</option>
@@ -603,7 +795,7 @@
                     <option>Count the earthquakes in each fire hazard zone and color the zones by that count.</option>
                     <option>Visualize parks, highways and intersections in Riverside together on one map.</option>
                 </optgroup>
-                <optgroup label="Interactive maps — use “Generate Map Code”, then “Run in Map”">
+                <optgroup id="codeExampleGroup" label="Interactive maps — Advanced mode (generates code)">
                     <option>Color each vegetation type differently and use opacity so large areas stand out while small patches fade (log scale on acreage).</option>
                     <option>Let me click a vegetation area to fade out all other polygons and show a popup with its vegetation type and acreage.</option>
                     <option>Classify vegetation patches into five acreage quantile classes computed from the features on screen.</option>
@@ -614,9 +806,20 @@
             <label for="promptBox" style="margin-top:10px;">Prompt</label>
             <textarea id="promptBox" placeholder="Example: Color Riverside by vegetation type."></textarea>
 
+            <label style="margin-top:10px; display:flex; align-items:center; gap:6px;">
+                Assistant mode
+                <button type="button" id="skillHelpBtn" class="help-btn"
+                        title="What do Basic and Advanced do?"
+                        aria-label="What do Basic and Advanced do?">?</button>
+            </label>
+            <div class="mode-toggle" id="skillModeToggle">
+                <button type="button" data-skill="basic" class="active">Basic</button>
+                <button type="button" data-skill="advanced">Advanced</button>
+            </div>
+
             <div class="row" style="margin-top: 10px;">
-                <button id="styleBtn">Suggest Style</button>
-                <button id="codeBtn" class="secondary">Generate Map Code</button>
+                <button id="styleBtn">Generate Style</button>
+                <button id="codeBtn" style="display:none;">Generate Map Code</button>
             </div>
 
             <div class="status-grid" style="margin-top: 10px;">
@@ -624,18 +827,56 @@
                 <div class="pill">Interaction: <strong id="interactionLabel">None</strong></div>
             </div>
 
-            <div class="hint">
-                “Suggest Style” returns a structured map style. “Generate Map Code” writes editable JavaScript
-                that runs on the map.
+            <div class="hint" id="promptHint">
+                “Generate Style” picks the best dataset(s) for your prompt and styles the map directly.
             </div>
         </section>
+
+        <details class="card" id="llmDetails">
+            <summary>
+                <h2 class="section-title">AI model &amp; API key</h2>
+                <span class="chip" id="llmChip">Checking…</span>
+            </summary>
+            <div>
+                <div class="llm-notice" id="llmNotice" style="display:none;"></div>
+
+                <label for="llmProvider">Provider</label>
+                <select id="llmProvider"></select>
+
+                <label for="llmKey" style="margin-top:10px; display:flex; align-items:center; gap:8px;">
+                    Your API key
+                    <a id="llmKeyLink" href="#" target="_blank" rel="noopener noreferrer" class="llm-link">Get a key ↗</a>
+                </label>
+                <div class="llm-key-row">
+                    <input id="llmKey" type="password" autocomplete="off" spellcheck="false"
+                           autocapitalize="off" data-lpignore="true" data-1p-ignore placeholder="Paste your key"/>
+                    <button type="button" id="llmShowBtn" class="secondary" aria-pressed="false">Show</button>
+                </div>
+
+                <label for="llmModel" style="margin-top:10px;">Model</label>
+                <select id="llmModel"></select>
+
+                <div class="row" style="margin-top:10px;">
+                    <button type="button" id="llmSaveBtn">Save &amp; check key</button>
+                    <button type="button" id="llmClearBtn" class="secondary">Remove key</button>
+                </div>
+
+                <div class="hint" id="llmStatus" role="status" aria-live="polite"></div>
+                <div class="hint">
+                    Your key is kept in this browser as a cookie that page scripts cannot read. It is sent
+                    with your requests to this server, which forwards it to the provider you chose and does
+                    not store or log it. Usage is billed to your own account. Use “Remove key” on a shared
+                    computer.
+                </div>
+            </div>
+        </details>
 
         <section class="card">
             <h2 class="section-title">Assistant Response</h2>
             <div id="assistantBox" class="assistant-box">No response yet.</div>
         </section>
 
-        <details class="card" id="codeDetails">
+        <details class="card" id="codeDetails" style="display:none;">
             <summary><span class="section-title">Generated Map Script</span></summary>
 
             <textarea id="codeBox" class="code-box" spellcheck="false" placeholder="// LLM-generated code will appear here."></textarea>
@@ -656,6 +897,19 @@
         <section class="card">
             <h2 class="section-title">Active Map Layers <span id="overlayBadge" class="chip" style="display:none;"></span></h2>
             <div id="layersPanel" class="small">No layers yet.</div>
+        </section>
+        </div> <!-- /exploreSection -->
+
+        <section class="card" id="browseCard" style="display:none;">
+            <h2 class="section-title">Datasets</h2>
+            <p class="subtitle">Click a dataset to preview its raw geometry on the map — no styling, no LLM.</p>
+            <!-- Kept for state plumbing (set by chat responses); the list below is the visible picker. -->
+            <select id="datasetSelect" style="display:none;">
+                <option value="">Loading datasets...</option>
+            </select>
+            <div class="browse-list" id="browseList">
+                <div class="small">Loading datasets…</div>
+            </div>
         </section>
 
         <details class="card" id="summaryDetails">
@@ -696,7 +950,7 @@
             </div>
         </details>
 
-        <details class="card">
+        <details class="card" id="timingsDetails">
             <summary><span class="section-title">Behind the Scenes: Retrieval &amp; Timings</span></summary>
 
             <div class="table-wrap">
@@ -734,7 +988,7 @@
         </details>
 
         {% if allow_uploads %}
-        <details class="card">
+        <details class="card" id="uploadDetails" style="display:none;">
             <summary><span class="section-title">Upload + Build Dataset</span></summary>
 
             <p class="subtitle" style="margin-bottom:12px;">
@@ -811,6 +1065,49 @@
     </main>
 </div>
 
+<div class="modal-backdrop" id="skillHelpModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="skillHelpTitle">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="skillHelpTitle">Basic vs. Advanced</h3>
+            <button type="button" class="modal-close" id="skillHelpClose" aria-label="Close">✕</button>
+        </div>
+
+        <div class="modal-section">
+            <h4>Basic — one button, a finished map</h4>
+            <p>
+                “Generate Style” sends your prompt to Catalyst, which picks the best dataset(s),
+                asks the LLM for a map style, and applies it immediately. Nothing to run or review.
+            </p>
+            <ul>
+                <li>Color the Riverside vegetation map by vegetation type.</li>
+                <li>Show fire hazard zones and buildings together on one map.</li>
+                <li>Color buildings by the fire hazard severity of the zone they fall in. <em>(spatial join)</em></li>
+            </ul>
+        </div>
+
+        <div class="modal-section">
+            <h4>Advanced — “Generate Map Code”</h4>
+            <p>
+                The button becomes “Generate Map Code”: it still styles the map, but also writes
+                editable JavaScript against the sandboxed map runtime. The code appears in the
+                “Generated Map Script” panel — review or edit it, then press “Run in Map” to
+                activate the behavior. Use it when the map should <em>do</em> something, not just
+                look a certain way.
+            </p>
+            <ul>
+                <li>Let me click a vegetation area to fade out all others and show a popup with its acreage.</li>
+                <li>Classify vegetation patches into five acreage quantile classes computed from the features on screen.</li>
+                <li>Color parks by acreage on a logarithmic scale.</li>
+            </ul>
+        </div>
+
+        <p class="hint" style="margin-top:12px;">
+            You can switch modes at any time — picking an “Interactive maps” example switches to
+            Advanced automatically.
+        </p>
+    </div>
+</div>
+
 <script>
     // Path prefix the app is mounted under ("/catalyst" on the public site, "" on
     // the dev box). Derived from the served URL so every API/tile/map URL works
@@ -830,6 +1127,17 @@
     };
 
     const els = {
+        llmDetails: document.getElementById("llmDetails"),
+        llmChip: document.getElementById("llmChip"),
+        llmNotice: document.getElementById("llmNotice"),
+        llmProvider: document.getElementById("llmProvider"),
+        llmKey: document.getElementById("llmKey"),
+        llmKeyLink: document.getElementById("llmKeyLink"),
+        llmShowBtn: document.getElementById("llmShowBtn"),
+        llmModel: document.getElementById("llmModel"),
+        llmSaveBtn: document.getElementById("llmSaveBtn"),
+        llmClearBtn: document.getElementById("llmClearBtn"),
+        llmStatus: document.getElementById("llmStatus"),
         promptBox: document.getElementById("promptBox"),
         codeBox: document.getElementById("codeBox"),
         styleBtn: document.getElementById("styleBtn"),
@@ -866,8 +1174,95 @@
         timingLegend: document.getElementById("timingLegend"),
         timingTotalMs: document.getElementById("timingTotalMs"),
         layersPanel: document.getElementById("layersPanel"),
-        overlayBadge: document.getElementById("overlayBadge")
+        overlayBadge: document.getElementById("overlayBadge"),
+        appModeToggle: document.getElementById("appModeToggle"),
+        skillModeToggle: document.getElementById("skillModeToggle"),
+        modeHint: document.getElementById("modeHint"),
+        promptHint: document.getElementById("promptHint"),
+        exploreSection: document.getElementById("exploreSection"),
+        browseCard: document.getElementById("browseCard"),
+        browseList: document.getElementById("browseList"),
+        summaryDetails: document.getElementById("summaryDetails"),
+        uploadDetails: document.getElementById("uploadDetails")
     };
+
+    // UI modes. App mode separates "prompt the assistant" (explore, the default)
+    // from "just look at the raw datasets" (browse). Skill mode gates the
+    // code-generation surface: basic = structured styles only, advanced also
+    // exposes "Generate Map Code" + the editable script panel.
+    const uiMode = { app: "explore", skill: "basic" };
+
+    function setAppMode(mode) {
+        uiMode.app = mode === "browse" ? "browse" : "explore";
+        const explore = uiMode.app === "explore";
+        els.appModeToggle.querySelectorAll("button").forEach(btn => {
+            btn.classList.toggle("active", btn.dataset.mode === uiMode.app);
+        });
+        els.exploreSection.style.display = explore ? "" : "none";
+        els.browseCard.style.display = explore ? "none" : "";
+        if (els.uploadDetails) els.uploadDetails.style.display = explore ? "none" : "";
+        els.modeHint.textContent = explore
+            ? "Describe what you want to see — Catalyst finds the right dataset(s) and styles the map. No need to pick a dataset first."
+            : "Pick a dataset to preview its raw geometry. Switch back to Explore to style it with a prompt.";
+        if (!explore) renderBrowseList();
+    }
+
+    function setSkillMode(mode) {
+        uiMode.skill = mode === "advanced" ? "advanced" : "basic";
+        const advanced = uiMode.skill === "advanced";
+        els.skillModeToggle.querySelectorAll("button").forEach(btn => {
+            btn.classList.toggle("active", btn.dataset.skill === uiMode.skill);
+        });
+        // One primary action per mode: Basic styles directly, Advanced generates
+        // code (which also styles the map) — never both buttons at once.
+        els.styleBtn.style.display = advanced ? "none" : "";
+        els.codeBtn.style.display = advanced ? "" : "none";
+        els.codeDetails.style.display = advanced ? "" : "none";
+        els.promptHint.textContent = advanced
+            ? "“Generate Map Code” styles the map and writes editable JavaScript — review it below, then press “Run in Map” to activate the behavior."
+            : "“Generate Style” picks the best dataset(s) for your prompt and styles the map directly.";
+    }
+
+    function renderBrowseList() {
+        const datasets = Array.isArray(state.datasetsCatalog) ? state.datasetsCatalog : [];
+        if (!datasets.length) {
+            els.browseList.innerHTML = `<div class="small">No datasets found.</div>`;
+            return;
+        }
+        els.browseList.innerHTML = datasets.map(item => {
+            const geoms = Array.isArray(item.geometry_types) && item.geometry_types.length
+                ? [...new Set(item.geometry_types)].join(", ") : "";
+            const bits = [];
+            if (geoms) bits.push(geoms);
+            if (item.attribute_count != null) bits.push(`${item.attribute_count} attributes`);
+            if (item.size_human) bits.push(item.size_human);
+            const active = item.id === state.dataset ? " active" : "";
+            return `
+              <div class="browse-item${active}" role="button" tabindex="0" data-dataset="${escapeHtml(item.id)}">
+                <div class="browse-item-name">${escapeHtml(item.name || item.id)}</div>
+                <span class="small">${escapeHtml(item.id)}${bits.length ? " · " + escapeHtml(bits.join(" · ")) : ""}</span>
+              </div>`;
+        }).join("");
+    }
+
+    async function browseDataset(dataset) {
+        if (!dataset) return;
+        // Browsing is a fresh look at one dataset: drop the ongoing conversation,
+        // styles and joins so the map shows plain unstyled geometry.
+        state.dataset = dataset;
+        state.interactionId = "";
+        state.selectedAttributes = [];
+        state.currentStyle = null;
+        state.deriveLive = null;
+        state.layers = [];
+        els.datasetSelect.value = dataset;
+        renderBrowseList();
+        updateStatus();
+        applyStateToMap();
+        await inspectDataset(dataset);
+        // Browsing is about the data itself — surface its metadata right away.
+        if (els.summaryDetails) els.summaryDetails.open = true;
+    }
 
     let mapFrameReady = false;
     let currentUploadJobId = "";
@@ -1211,6 +1606,7 @@
         const resp = await fetch(CATALYST_BASE + url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
             body: JSON.stringify(payload)
         });
 
@@ -1221,10 +1617,226 @@
             throw new Error(`Invalid JSON from ${url}`);
         }
 
+        noteLlmOutcome(data);
         if (!resp.ok) {
             throw new Error(data?.error || `Request failed (${resp.status})`);
         }
         return data;
+    }
+
+    // ------------------------------------------------------------------
+    // Bring your own API key. The key is handed to the server once, which
+    // validates it and returns it as an HttpOnly cookie: it stays in this
+    // browser, the server stores nothing, and no page script (including
+    // generated map code) can read it back.
+    // ------------------------------------------------------------------
+    const LLM_FALLBACK_PROVIDERS = [
+        { id: "gemini", label: "Google Gemini", default_model: "gemini-flash-latest", key_url: "https://aistudio.google.com/apikey", key_hint: "AIza…" },
+        { id: "openai", label: "OpenAI (ChatGPT)", default_model: "gpt-5.1", key_url: "https://platform.openai.com/api-keys", key_hint: "sk-…" },
+        { id: "anthropic", label: "Anthropic (Claude)", default_model: "claude-opus-5-5", key_url: "https://platform.claude.com/settings/keys", key_hint: "sk-ant-…" }
+    ];
+    // saved = { provider, model, key_hint } — never the key itself.
+    const llm = { providers: LLM_FALLBACK_PROVIDERS, serverOk: null, serverConfigured: false, saved: null, models: {} };
+
+    async function llmKeyRequest(method, body) {
+        const resp = await fetch(CATALYST_BASE + "/api/llm/key", {
+            method,
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: body ? JSON.stringify({ ...body, base: CATALYST_BASE, https: window.location.protocol === "https:" }) : undefined
+        });
+        let data = null;
+        try { data = await resp.json(); } catch (e) { throw new Error(`Unexpected response (${resp.status})`); }
+        return data;
+    }
+
+    function llmProviderMeta(id) {
+        return llm.providers.find(p => p.id === id) || null;
+    }
+
+    function setLlmStatus(text, kind) {
+        els.llmStatus.textContent = text || "";
+        els.llmStatus.className = "hint" + (kind ? " " + kind : "");
+    }
+
+    function setLlmNotice(text, kind) {
+        els.llmNotice.textContent = text || "";
+        els.llmNotice.className = "llm-notice" + (kind ? " " + kind : "");
+        els.llmNotice.style.display = text ? "" : "none";
+    }
+
+    function fillLlmModels(providerId, selected) {
+        const meta = llmProviderMeta(providerId);
+        const list = (llm.models[providerId] || []).slice();
+        const want = selected || (meta ? meta.default_model : "");
+        if (want && !list.includes(want)) list.unshift(want);
+        els.llmModel.innerHTML = "";
+        for (const id of list) {
+            const o = document.createElement("option");
+            o.value = id; o.textContent = id;
+            els.llmModel.appendChild(o);
+        }
+        if (want) els.llmModel.value = want;
+    }
+
+    function renderLlmChip() {
+        const meta = llm.saved ? llmProviderMeta(llm.saved.provider) : null;
+        let text, cls;
+        if (llm.saved) {
+            text = `Your ${meta ? meta.label : llm.saved.provider} key`; cls = "ok";
+        } else if (llm.serverConfigured && llm.serverOk !== false) {
+            text = "Built-in model"; cls = "ok";
+        } else {
+            text = "Add a key"; cls = "warn";
+        }
+        els.llmChip.textContent = text;
+        els.llmChip.className = "chip " + cls;
+    }
+
+    function onLlmProviderChange() {
+        const id = els.llmProvider.value;
+        const meta = llmProviderMeta(id);
+        const sameAsSaved = llm.saved && llm.saved.provider === id;
+        els.llmKeyLink.href = meta ? meta.key_url : "#";
+        els.llmKey.value = "";
+        els.llmKey.placeholder = sameAsSaved
+            ? `Saved key ending in ${llm.saved.key_hint} (paste a new one to replace it)`
+            : (meta ? `Paste your key (${meta.key_hint})` : "Paste your key");
+        fillLlmModels(id, sameAsSaved ? llm.saved.model : "");
+        setLlmStatus("");
+    }
+
+    function applyLlmSaved(data) {
+        llm.saved = data && data.saved
+            ? { provider: data.provider, model: data.model, key_hint: data.key_hint } : null;
+        if (data && Array.isArray(data.models) && data.provider) llm.models[data.provider] = data.models;
+        if (llm.saved && llmProviderMeta(llm.saved.provider)) els.llmProvider.value = llm.saved.provider;
+        onLlmProviderChange();
+        renderLlmChip();
+    }
+
+    async function saveLlmKey() {
+        const provider = els.llmProvider.value;
+        const key = els.llmKey.value.trim();
+        if (!key) {
+            setLlmStatus(llm.saved && llm.saved.provider === provider
+                ? "Your key is already saved. Paste a new key to replace it." : "Paste an API key first.", "error");
+            els.llmKey.focus();
+            return;
+        }
+        els.llmSaveBtn.disabled = true;
+        els.llmSaveBtn.textContent = "Checking…";
+        setLlmStatus("");
+        try {
+            const data = await llmKeyRequest("POST", { provider, key, model: els.llmModel.value || "" });
+            if (!data.ok) {
+                setLlmStatus(`Key not accepted: ${data.error || "unknown error"}`, "error");
+                return;
+            }
+            applyLlmSaved(data);
+            setLlmNotice("");
+            setLlmStatus(`Key works and is saved. Using ${data.model}.`, "ok");
+        } catch (err) {
+            setLlmStatus(`Could not check the key: ${err.message}`, "error");
+        } finally {
+            els.llmSaveBtn.disabled = false;
+            els.llmSaveBtn.textContent = "Save & check key";
+        }
+    }
+
+    async function clearLlmKey() {
+        try {
+            await llmKeyRequest("DELETE", {});
+        } catch (err) {
+            setLlmStatus(`Could not remove the key: ${err.message}`, "error");
+            return;
+        }
+        applyLlmSaved(null);
+        setLlmStatus("Key removed from this browser.");
+        showLlmHintIfNeeded();
+    }
+
+    async function changeLlmModel() {
+        if (!(llm.saved && llm.saved.provider === els.llmProvider.value)) return;
+        try {
+            const data = await llmKeyRequest("POST", { model: els.llmModel.value });
+            if (data.ok) {
+                llm.saved.model = data.model;
+                setLlmStatus(`Using ${data.model}.`, "ok");
+            } else {
+                setLlmStatus(data.error || "Could not change the model.", "error");
+            }
+        } catch (err) {
+            setLlmStatus(`Could not change the model: ${err.message}`, "error");
+        }
+    }
+
+    function showLlmHintIfNeeded() {
+        if (llm.saved || (llm.serverConfigured && llm.serverOk !== false)) return;
+        setLlmNotice(
+            "The built-in AI model is not available on this site right now. Add your own API key " +
+            "below to have an AI model pick datasets and style the map. Without one, Catalyst falls " +
+            "back to keyword matching with default styles."
+        );
+        els.llmDetails.open = true;
+    }
+
+    // Every LLM-backed response reports what happened on the model side.
+    function noteLlmOutcome(data) {
+        const info = data && data.llm;
+        if (!info) return;
+        if (info.source === "server") llm.serverOk = !info.error;
+        if (!info.error) {
+            if (info.source === "user") setLlmNotice("");
+            renderLlmChip();
+            return;
+        }
+        if (info.source === "user") {
+            setLlmNotice(`Your API key did not work for this request, so default matching was used. ${info.error}`, "error");
+        } else {
+            setLlmNotice(
+                "The built-in AI model is not available right now, so default matching was used. " +
+                "Add your own API key below to use an AI model."
+            );
+        }
+        els.llmDetails.open = true;
+        renderLlmChip();
+    }
+
+    async function initLlm() {
+        els.llmProvider.addEventListener("change", onLlmProviderChange);
+        els.llmSaveBtn.addEventListener("click", saveLlmKey);
+        els.llmClearBtn.addEventListener("click", clearLlmKey);
+        els.llmModel.addEventListener("change", changeLlmModel);
+        els.llmKey.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveLlmKey(); } });
+        els.llmShowBtn.addEventListener("click", () => {
+            const show = els.llmKey.type === "password";
+            els.llmKey.type = show ? "text" : "password";
+            els.llmShowBtn.textContent = show ? "Hide" : "Show";
+            els.llmShowBtn.setAttribute("aria-pressed", String(show));
+        });
+
+        // An earlier build kept the key in localStorage; make sure none is left there.
+        try { localStorage.removeItem("catalyst.llm.v1"); } catch (e) { /* ignore */ }
+
+        let saved = null;
+        try {
+            const cfg = await getJSON("/api/llm/config");
+            if (Array.isArray(cfg.providers) && cfg.providers.length) llm.providers = cfg.providers;
+            llm.serverConfigured = !!cfg.server_key_configured;
+            llm.serverOk = cfg.server_llm_ok;
+            saved = await llmKeyRequest("GET");
+        } catch (e) {
+            setLlmStatus("Could not load the AI settings. Reload the page to try again.", "error");
+        }
+        els.llmProvider.innerHTML = "";
+        for (const p of llm.providers) {
+            const o = document.createElement("option");
+            o.value = p.id; o.textContent = p.label;
+            els.llmProvider.appendChild(o);
+        }
+        applyLlmSaved(saved);
+        showLlmHintIfNeeded();
     }
 
     async function getJSON(url) {
@@ -1306,8 +1918,10 @@
             } else if (state.dataset) {
                 els.datasetSelect.value = state.dataset;
             }
+            renderBrowseList();
         } catch (err) {
             els.datasetSelect.innerHTML = `<option value="">Failed to load datasets</option>`;
+            els.browseList.innerHTML = `<div class="small">Failed to load datasets.</div>`;
         }
     }
 
@@ -1480,7 +2094,7 @@
             updateStatus();
         } finally {
             els.styleBtn.disabled = false;
-            els.styleBtn.textContent = "Suggest Style";
+            els.styleBtn.textContent = "Generate Style";
         }
     }
 
@@ -1519,7 +2133,7 @@
         throw new Error("Derive timed out after ~20 minutes");
     }
 
-    async function generateMapCode() {
+    async function generateMapCode(lockDataset = false) {
         const query = els.promptBox.value.trim();
         if (!query) return;
 
@@ -1540,8 +2154,26 @@
                 current_style: state.currentStyle,
                 // Active lazy join: code must be generated against the joined layer
                 derive_live: state.deriveLive || undefined,
+                // After a derive, pin the derived dataset: the server's pivot
+                // check can't see derived datasets and would re-derive forever.
+                lock_dataset: lockDataset || undefined,
                 k: 5
             });
+
+            // Cross-dataset "combine" prompts (count/sum/mean joins) first build
+            // the derived dataset in a background job — same 202 the style path
+            // gets. Poll it, render the derived result, then generate the code
+            // against the now-selected derived dataset (locked, exactly once).
+            if (data && (data.selection_mode === "deriving" || data.derive_job_id)) {
+                if (lockDataset) throw new Error("Derive loop detected — dataset lock was ignored");
+                if (data.interaction_id) state.interactionId = data.interaction_id;
+                state.lastAssistantResponse = data.assistant_response ||
+                    "Combining datasets… this can take a minute for large datasets.";
+                updateStatus();
+                await pollDeriveJob(data.derive_job_id);
+                if (state.dataset) await generateMapCode(true);
+                return;
+            }
 
             syncFromResponse(data);
 
@@ -1600,7 +2232,7 @@
     // button was removed from the UI (styles auto-apply after every chat turn).
     if (els.uploadBuildBtn) els.uploadBuildBtn.addEventListener("click", uploadAndBuildDataset);
     els.styleBtn.addEventListener("click", suggestStyle);
-    els.codeBtn.addEventListener("click", generateMapCode);
+    els.codeBtn.addEventListener("click", () => generateMapCode());
     els.runBtn.addEventListener("click", runCode);
     els.resetBtn.addEventListener("click", resetMap);
     if (els.applyStateBtn) els.applyStateBtn.addEventListener("click", applyStateToMap);
@@ -1618,26 +2250,61 @@
         state.currentStyle = null;
         state.deriveLive = null;
         state.layers = [];
+        // Interactive examples need code generation — flip to Advanced for them.
+        const opt = promptExamples.selectedOptions && promptExamples.selectedOptions[0];
+        if (opt && opt.parentElement && opt.parentElement.id === "codeExampleGroup") {
+            setSkillMode("advanced");
+        }
         updateStatus();
         els.promptBox.focus();
     });
 
-    els.datasetSelect.addEventListener("change", async () => {
-        const dataset = els.datasetSelect.value || "";
-        if (!dataset) return;
-        state.dataset = dataset;
-        state.interactionId = "";
-        state.selectedAttributes = [];
-        state.currentStyle = null;
-        state.layers = [];
-        updateStatus();
-        applyStateToMap();
-        await inspectDataset(dataset);
+    els.datasetSelect.addEventListener("change", () => {
+        browseDataset(els.datasetSelect.value || "");
+    });
+
+    els.appModeToggle.addEventListener("click", (event) => {
+        const btn = event.target.closest("button[data-mode]");
+        if (btn) setAppMode(btn.dataset.mode);
+    });
+
+    els.skillModeToggle.addEventListener("click", (event) => {
+        const btn = event.target.closest("button[data-skill]");
+        if (btn) setSkillMode(btn.dataset.skill);
+    });
+
+    els.browseList.addEventListener("click", (event) => {
+        const item = event.target.closest(".browse-item[data-dataset]");
+        if (item) browseDataset(item.dataset.dataset);
+    });
+    const skillHelpModal = document.getElementById("skillHelpModal");
+    document.getElementById("skillHelpBtn").addEventListener("click", () => {
+        skillHelpModal.style.display = "flex";
+    });
+    document.getElementById("skillHelpClose").addEventListener("click", () => {
+        skillHelpModal.style.display = "none";
+    });
+    skillHelpModal.addEventListener("click", (event) => {
+        if (event.target === skillHelpModal) skillHelpModal.style.display = "none";
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") skillHelpModal.style.display = "none";
+    });
+
+    els.browseList.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const item = event.target.closest(".browse-item[data-dataset]");
+        if (item) {
+            event.preventDefault();
+            browseDataset(item.dataset.dataset);
+        }
     });
 
     els.promptBox.addEventListener("keydown", (event) => {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-            suggestStyle();
+            // Trigger whichever action the current assistant mode exposes.
+            if (uiMode.skill === "advanced") generateMapCode();
+            else suggestStyle();
         }
     });
 
@@ -1728,8 +2395,11 @@
     })();
 
     async function initialize() {
+        setAppMode("explore");
+        setSkillMode("basic");
         updateStatus();
         renderMetadata();
+        initLlm();
         await loadDatasetsCatalog();
     }
 
